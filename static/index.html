@@ -1,102 +1,264 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#000000">
-<title>Single · mDNS LAN Control</title>
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0b0d10">
+<title>Single</title>
+<script>
+/* Apply the saved theme before first paint (no flash). */
+try {
+  var _t = localStorage.getItem("single-theme") || "dark";
+  var _dark = _t === "dark" || (_t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.dataset.theme = _dark ? "dark" : "light";
+} catch (e) {}
+</script>
 <link rel="icon" type="image/svg+xml" href="/logo.svg">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
-<div id="reconnectBanner" class="reconnect-banner hidden">WebSocket lost — reconnecting…</div>
+<div class="app">
 
-<header class="topbar">
-  <div class="brand">
-    <span class="logo" aria-hidden="true">
-      <img src="/logo.svg" alt="">
-    </span>
-    <div>
-      <h1>Single</h1>
-      <p class="sub">mDNS auto-discovery · LAN control server</p>
+  <!-- ================= sidebar ================= -->
+  <aside class="sidebar">
+    <div class="side-brand">
+      <img class="side-logo" src="/logo.svg" alt="Single">
+      <span class="side-name">Single</span>
     </div>
-  </div>
 
-  <div class="self-card" id="selfCard" title="This host, broadcast over mDNS">
-    <div class="self-main">
-      <span class="platform-badge" id="selfPlatform">…</span>
-      <span class="self-name" id="selfName">…</span>
-      <button class="icon-btn" id="editNameBtn" title="Rename this device (re-broadcasts mDNS)">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 19.5h4L20 8a2.12 2.12 0 0 0-3-3L5.5 16.5v3z"/><path d="m14.5 6.5 3 3"/></svg>
+    <nav class="side-nav" id="sideNav">
+      <button class="nav-item active" data-page="devices" title="Devices">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="12" rx="2"/><path d="M8 20.5h8"/><path d="M12 16.5v4"/></svg>
+        <span class="nav-label">Devices</span>
       </button>
-    </div>
-    <div class="self-meta">
-      <span class="mono" id="selfAddr">…</span>
-      <span class="dot">·</span>
-      <span class="mono dim" id="selfSvc">_p2pbridge._tcp.local.</span>
-    </div>
-  </div>
+      <button class="nav-item" data-page="chats" title="Chats">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 12a8.5 8.5 0 0 1-12.4 7.5L3.5 20.5l1-4.6A8.5 8.5 0 1 1 20.5 12z"/></svg>
+        <span class="nav-label">Chats</span>
+        <span class="nav-badge hidden" id="navBadge">0</span>
+      </button>
+      <button class="nav-item" data-page="activity" title="Activity">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 12.5h4l2.5-6 4 12 2.5-6h4"/></svg>
+        <span class="nav-label">Activity</span>
+      </button>
+      <button class="nav-item" data-page="settings" title="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14.2 3H9.8l-.4 2.7a7 7 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5a7 7 0 0 0 0 2.4l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2 1.2l.4 2.7h4.4l.4-2.7a7 7 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5c.06-.4.1-.8.1-1.2z"/></svg>
+        <span class="nav-label">Settings</span>
+      </button>
+    </nav>
 
-  <div class="ws-pill" id="wsPill"><span class="led" id="wsLed"></span><span id="wsText">connecting…</span><span id="wsRtt" class="dim mono"></span></div>
-</header>
+    <div class="side-foot">
+      <div class="ws-pill"><span class="led off" id="wsLed"></span><span id="wsText">connecting…</span><span class="mono dim" id="wsRtt"></span></div>
+      <div class="side-ver dim" id="verTag">v0.1.1</div>
+    </div>
+  </aside>
 
-<div class="stats">
-  <div class="stat"><span class="stat-num" id="statDevices">0</span><span class="stat-label">devices</span></div>
-  <div class="stat android"><span class="stat-num" id="statAndroid">0</span><span class="stat-label">Android</span></div>
-  <div class="stat windows"><span class="stat-num" id="statWindows">0</span><span class="stat-label">Windows</span></div>
-  <div class="stat ok"><span class="stat-num" id="statSessions">0</span><span class="stat-label">P2P sessions</span></div>
-  <div class="stat"><span class="stat-num" id="statUptime">0s</span><span class="stat-label">uptime</span></div>
+  <!-- ================= content ================= -->
+  <main class="content">
+
+    <!-- ========== page: devices ========== -->
+    <section class="page active" id="page-devices">
+      <header class="page-head">
+        <div>
+          <h1>Devices</h1>
+          <p class="sub">mDNS auto-discovery · <span class="mono" id="svcType">_p2pbridge._tcp.local.</span></p>
+        </div>
+        <button class="btn ghost" id="refreshBtn" title="Ask the server to rebroadcast the device list">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 12a8.5 8.5 0 1 1-2.5-6l2.5 2.3"/><path d="M20.5 3.5v5h-5"/></svg>
+          Rescan
+        </button>
+      </header>
+
+      <div class="self-card" id="selfCard" title="This host, broadcast over mDNS">
+        <span class="dev-icon big" id="selfIcon"></span>
+        <div class="grow">
+          <div class="self-row">
+            <span class="self-name" id="selfName">…</span>
+            <span class="platform-badge" id="selfPlatform">…</span>
+          </div>
+          <div class="self-meta dim">
+            <span class="mono" id="selfAddr">…</span>
+            <span class="dot">·</span>
+            <span>dashboard <span class="mono" id="selfHttp"></span></span>
+          </div>
+        </div>
+        <span class="pill-note">this device</span>
+      </div>
+
+      <div class="toolbar">
+        <div class="filters" id="filters">
+          <button class="chip active" data-f="all">All</button>
+          <button class="chip" data-f="android">Android</button>
+          <button class="chip" data-f="windows">Windows</button>
+          <button class="chip" data-f="other">Other</button>
+        </div>
+        <span class="dim" id="devCount"></span>
+      </div>
+
+      <div class="device-grid" id="deviceGrid"></div>
+
+      <div class="empty" id="emptyState">
+        <div class="radar">
+          <span></span><span></span><span></span>
+          <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2.5 9.2a14.5 14.5 0 0 1 19 0"/><path d="M5.5 12.7a10 10 0 0 1 13 0"/><path d="M8.5 16.2a5.8 5.8 0 0 1 7 0"/><circle cx="12" cy="19.6" r="1.3" fill="currentColor" stroke="none"/></svg></i>
+        </div>
+        <p><b>Scanning the local network…</b></p>
+        <p class="dim">No peers found yet. Run <span class="mono">Single</span> on another device on the same
+        Wi-Fi, or start <span class="mono">tools\Device-Simulator.exe</span> for a quick demo.</p>
+      </div>
+    </section>
+
+    <!-- ========== page: chats ========== -->
+    <section class="page" id="page-chats">
+      <header class="page-head">
+        <div>
+          <h1>Chats</h1>
+          <p class="sub">direct P2P conversations · files · latency</p>
+        </div>
+      </header>
+
+      <div class="chat-layout">
+        <aside class="chat-list" id="chatList">
+          <div class="chat-list-empty dim" id="chatsEmpty">
+            No conversations yet.<br>
+            Connect to a device from the <b>Devices</b> page.
+          </div>
+        </aside>
+        <section class="chat-main" id="chatMain">
+          <div class="chat-placeholder" id="chatPlaceholder">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 12a8.5 8.5 0 0 1-12.4 7.5L3.5 20.5l1-4.6A8.5 8.5 0 1 1 20.5 12z"/><path d="M8.5 12h.01M12 12h.01M15.5 12h.01"/></svg>
+            <p><b>Select a conversation</b></p>
+            <p class="dim">Pick one on the left, or connect to a device from the Devices page.</p>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- ========== page: activity ========== -->
+    <section class="page" id="page-activity">
+      <header class="page-head">
+        <div>
+          <h1>Activity</h1>
+          <p class="sub">server events · handshakes · transfers</p>
+        </div>
+        <div class="filters" id="logFilters">
+          <button class="chip active" data-lvl="all">All</button>
+          <button class="chip" data-lvl="info">Info</button>
+          <button class="chip" data-lvl="ok">OK</button>
+          <button class="chip" data-lvl="warn">Warn</button>
+          <button class="chip" data-lvl="error">Error</button>
+        </div>
+      </header>
+
+      <div class="stats">
+        <div class="stat"><span class="stat-num" id="statUptime">0s</span><span class="stat-label">uptime</span></div>
+        <div class="stat"><span class="stat-num" id="statDevices">0</span><span class="stat-label">devices found</span></div>
+        <div class="stat ok"><span class="stat-num" id="statSessions">0</span><span class="stat-label">P2P established</span></div>
+        <div class="stat"><span class="stat-num" id="statLogs">0</span><span class="stat-label">log events</span></div>
+      </div>
+
+      <div class="console-wrap">
+        <div class="console-head">
+          <h2>Live log</h2>
+          <div>
+            <button class="chip" id="pauseLog">Pause</button>
+            <button class="chip" id="clearLog">Clear</button>
+          </div>
+        </div>
+        <div class="console" id="console"></div>
+      </div>
+    </section>
+
+    <!-- ========== page: settings ========== -->
+    <section class="page" id="page-settings">
+      <header class="page-head">
+        <div>
+          <h1>Settings</h1>
+          <p class="sub">identity · appearance · network</p>
+        </div>
+      </header>
+
+      <div class="settings-grid">
+
+        <section class="card">
+          <h2>Identity</h2>
+          <div class="set-row">
+            <div>
+              <div class="set-label">Device name</div>
+              <div class="dim small">broadcast over mDNS — this is how other devices see you</div>
+            </div>
+            <div class="set-actions" id="nameRow">
+              <span class="mono" id="setName">…</span>
+              <button class="btn ghost" id="renameBtn">Rename</button>
+            </div>
+          </div>
+          <div class="set-row">
+            <div class="set-label">Platform</div>
+            <span class="platform-badge" id="setPlatform">…</span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Appearance</h2>
+          <div class="set-row">
+            <div>
+              <div class="set-label">Theme</div>
+              <div class="dim small">System follows your OS setting</div>
+            </div>
+            <div class="seg" id="themeSeg">
+              <button class="chip active" data-t="dark">Dark</button>
+              <button class="chip" data-t="light">Light</button>
+              <button class="chip" data-t="system">System</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Network</h2>
+          <div class="set-row"><div class="set-label">LAN address</div><span class="mono" id="setIp">…</span></div>
+          <div class="set-row"><div class="set-label">P2P port</div><span class="mono" id="setP2p">…</span></div>
+          <div class="set-row"><div class="set-label">Dashboard</div><span class="mono" id="setHttp">…</span></div>
+          <div class="set-row"><div class="set-label">mDNS service</div><span class="mono" id="setSvc">…</span></div>
+        </section>
+
+        <section class="card">
+          <h2>Storage</h2>
+          <div class="set-row">
+            <div>
+              <div class="set-label">Received files</div>
+              <div class="dim small">Files sent to you are saved to the <span class="mono">received\</span> folder next to the app — every transfer is SHA-256 verified.</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Firewall</h2>
+          <div class="set-row">
+            <div>
+              <div class="set-label">Ports in use</div>
+              <div class="dim small">UDP 5353 (mDNS discovery) · TCP 3000 (dashboard) · TCP 5050 (P2P).<br>
+              If other devices can't find you, run <span class="mono">enable-firewall.bat</span> once as administrator.</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>About</h2>
+          <div class="set-row">
+            <div>
+              <div class="set-label">Single <span class="mono dim" id="setVer">v0.1.1</span></div>
+              <div class="dim small">mDNS LAN control server · P2PBRIDGE/1 protocol · built from the p2p-bridge Rust project · MIT license.</div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </section>
+  </main>
 </div>
 
-<main class="layout">
-  <section class="panel devices-panel">
-    <div class="panel-head">
-      <h2>Discovered devices</h2>
-      <div class="filters" id="filters">
-        <button class="chip active" data-f="all">All</button>
-        <button class="chip" data-f="android">Android</button>
-        <button class="chip" data-f="windows">Windows</button>
-        <button class="chip" data-f="other">Other</button>
-      </div>
-    </div>
-    <div class="device-grid" id="deviceGrid"></div>
-    <div class="empty" id="emptyState">
-      <div class="radar">
-        <span></span><span></span><span></span>
-        <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2.5 9.2a14.5 14.5 0 0 1 19 0"/><path d="M5.5 12.7a10 10 0 0 1 13 0"/><path d="M8.5 16.2a5.8 5.8 0 0 1 7 0"/><circle cx="12" cy="19.6" r="1.3" fill="currentColor" stroke="none"/></svg></i>
-      </div>
-      <p><b>Scanning the local network…</b></p>
-      <p class="dim">No <span class="mono">_p2pbridge._tcp.local.</span> peers found yet.<br>
-      Start <span class="mono">tools\Device-Simulator.exe</span> on this machine, or run<br>
-      <span class="mono">Single</span> on another Wi-Fi device.</p>
-    </div>
-  </section>
-
-  <section class="panel sessions-panel">
-    <div class="panel-head">
-      <h2>P2P sessions</h2>
-      <span class="hint dim">TCP handshake · chat · latency · files</span>
-    </div>
-    <div id="sessionList" class="session-list"></div>
-    <div class="empty small" id="sessionsEmpty">
-      <p class="dim">No sessions yet — click <b>Connect</b> on a device<br>to run the peer-to-peer TCP handshake.</p>
-    </div>
-  </section>
-</main>
-
-<footer class="panel console-panel">
-  <div class="panel-head">
-    <h2>Activity log</h2>
-    <div>
-      <button class="chip" id="pauseLog">Pause</button>
-      <button class="chip" id="clearLog">Clear</button>
-    </div>
-  </div>
-  <div class="console" id="console"></div>
-</footer>
-
+<div id="reconnectBanner" class="reconnect-banner hidden">Connection lost — reconnecting…</div>
 <input type="file" id="filePicker" class="hidden">
 <script src="/app.js"></script>
 </body>

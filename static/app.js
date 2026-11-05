@@ -1,6 +1,7 @@
-/* p2p-bridge dashboard — vanilla JS WebSocket client.
+/* Single — dashboard client.
  *
- * Protocol (see src/protocol.rs):
+ * Multi-page SPA: Devices · Chats · Activity · Settings (see index.html).
+ * The WebSocket protocol is unchanged (see src/protocol.rs):
  *   ← hello {self_identity, service_type}
  *   ← devices {devices:[…]}          live mDNS registry
  *   ← session {session}              P2P session state (handshake steps, rtt…)
@@ -12,12 +13,15 @@
 
 "use strict";
 
+/* keep in sync with Cargo.toml → shown in the sidebar + Settings */
+const APP_VERSION = "0.1.1";
+
 const $ = (id) => document.getElementById(id);
 const esc = (s) =>
   String(s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-/* Monochrome line glyphs (SF-Symbols style) — inserted via innerHTML templates. */
+/* Monochrome line glyphs — inserted via innerHTML templates. */
 const GLYPH = 'fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"';
 const ICONS = {
   android: `<svg viewBox="0 0 24 24" ${GLYPH}><path d="M7.1 6.9 5.8 5.2M16.9 6.9l1.3-1.7"/><path d="M5.5 11a6.5 6.5 0 0 1 13 0v4.5a2.5 2.5 0 0 1-2.5 2.5H8a2.5 2.5 0 0 1-2.5-2.5V11z"/><path d="M3.5 12v4M20.5 12v4"/><circle cx="9.6" cy="8.6" r="1" fill="currentColor" stroke="none"/><circle cx="14.4" cy="8.6" r="1" fill="currentColor" stroke="none"/></svg>`,
@@ -32,16 +36,59 @@ const state = {
   ws: null,
   self: null,
   serviceType: "_p2pbridge._tcp.local.",
-  devices: new Map(),      // id → device dto
-  sessions: new Map(),     // peer_id → { dto, el refs, chatRendered }
+  devices: new Map(),       // id → device dto
+  sessions: new Map(),      // peer_id → { dto, unread }
+  activePeer: null,
   filter: "all",
+  page: "devices",
   paused: false,
+  logLvl: "all",
+  logCount: 0,
   reconnectSec: 1,
   wsPingSent: 0,
-  sessionSeq: 0,
+  pendingConnect: null,
 };
 
-/* ---------------------------------------------------------------- ws */
+/* ================================================================== pages */
+
+function showPage(name) {
+  state.page = name;
+  document.querySelectorAll(".page").forEach((p) => p.classList.toggle("active", p.id === `page-${name}`));
+  document.querySelectorAll("#sideNav .nav-item").forEach((b) => b.classList.toggle("active", b.dataset.page === name));
+}
+
+$("sideNav").addEventListener("click", (e) => {
+  const btn = e.target.closest(".nav-item");
+  if (btn) showPage(btn.dataset.page);
+});
+
+/* ================================================================== theme */
+
+const THEME_KEY = "single-theme";
+const mq = matchMedia("(prefers-color-scheme: dark)");
+
+function applyTheme(mode) {
+  const dark = mode === "dark" || (mode === "system" && mq.matches);
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  document.querySelector('meta[name="theme-color"]').setAttribute("content", dark ? "#0b0d10" : "#eef1f6");
+}
+
+function setTheme(mode) {
+  localStorage.setItem(THEME_KEY, mode);
+  applyTheme(mode);
+  document.querySelectorAll("#themeSeg .chip").forEach((c) => c.classList.toggle("active", c.dataset.t === mode));
+}
+
+mq.addEventListener("change", () => {
+  if ((localStorage.getItem(THEME_KEY) || "dark") === "system") applyTheme("system");
+});
+
+$("themeSeg").addEventListener("click", (e) => {
+  const chip = e.target.closest(".chip");
+  if (chip) setTheme(chip.dataset.t);
+});
+
+/* ================================================================== ws */
 
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -54,7 +101,7 @@ function connect() {
     state.reconnectSec = 1;
   };
   ws.onclose = () => {
-    setWsStatus("off", "disconnected");
+    setWsStatus("off", "offline");
     $("reconnectBanner").classList.remove("hidden");
     const delay = Math.min(state.reconnectSec, 8) * 1000;
     state.reconnectSec = Math.min(state.reconnectSec * 1.7, 8);
@@ -70,6 +117,7 @@ function connect() {
 
 function send(obj) {
   if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify(obj));
+  return state.ws && state.ws.readyState === 1;
 }
 
 function setWsStatus(cls, text) {
@@ -77,7 +125,7 @@ function setWsStatus(cls, text) {
   $("wsText").textContent = text;
 }
 
-/* ---------------------------------------------------------- dispatch */
+/* ================================================================== dispatch */
 
 function handle(msg) {
   switch (msg.type) {
@@ -95,10 +143,21 @@ function handle(msg) {
       break;
     case "chat": {
       const s = state.sessions.get(msg.peer_id);
-      if (s) {
-        if (s.dto.chat) s.dto.chat.push(msg.line);
+      if (!s) break;
+      if (!s.dto.chat) s.dto.chat = [];
+      const last = s.dto.chat[s.dto.chat.length - 1];
+      const dup = last && last.dir === msg.line.dir && last.text === msg.line.text && last.ts === msg.line.ts;
+      if (!dup) s.dto.chat.push(msg.line);
+      if (state.activePeer === msg.peer_id) {
+        const chatEl = $("chatMain").querySelector(".chat-view .chat");
+        const hint = chatEl && chatEl.querySelector(".bubble.hint");
+        if (hint) hint.remove();
         appendBubble(s, msg.line);
+        s._rendered = (s.dto.chat || []).length;
       }
+      else s.unread++;
+      updateNavBadge();
+      renderChatList();
       break;
     }
     case "file":
@@ -113,24 +172,37 @@ function handle(msg) {
   }
 }
 
-/* -------------------------------------------------------------- self */
+/* ================================================================== self */
 
 function renderSelf() {
   if (!state.self) return;
   const p = state.self.platform;
+
+  /* devices page — identity card */
+  $("selfIcon").innerHTML = ICONS[p] || ICONS.unknown;
+  $("selfName").textContent = state.self.name;
   $("selfPlatform").textContent = LABEL[p] || p;
   $("selfPlatform").className = "platform-badge " + p;
-  $("selfName").textContent = state.self.name;
   $("selfAddr").textContent = `${state.self.ip}:${state.self.p2p_port}`;
-  $("selfSvc").textContent = state.serviceType;
+  $("selfHttp").textContent = location.host;
+  $("svcType").textContent = state.serviceType;
+
+  /* settings page */
+  $("setName").textContent = state.self.name;
+  $("setPlatform").textContent = LABEL[p] || p;
+  $("setPlatform").className = "platform-badge " + p;
+  $("setIp").textContent = state.self.ip;
+  $("setP2p").textContent = String(state.self.p2p_port);
+  $("setHttp").textContent = location.host;
+  $("setSvc").textContent = state.serviceType;
 }
 
-$("editNameBtn").addEventListener("click", () => {
-  const card = $("selfCard");
-  if (card.querySelector(".rename-row")) return;
-  const row = document.createElement("div");
-  row.className = "rename-row";
-  row.style.marginTop = "6px";
+/* rename — inline editor inside Settings › Identity */
+$("renameBtn").addEventListener("click", () => {
+  const row = $("nameRow");
+  if (row.querySelector(".rename-row")) return;
+  const wrap = document.createElement("div");
+  wrap.className = "rename-row";
   const input = document.createElement("input");
   input.value = state.self ? state.self.name : "";
   input.maxLength = 48;
@@ -140,46 +212,73 @@ $("editNameBtn").addEventListener("click", () => {
   ok.textContent = "Save";
   const cancel = document.createElement("button");
   cancel.className = "btn small ghost";
-  cancel.textContent = "✕";
+  cancel.textContent = "Cancel";
   ok.onclick = () => {
     const v = input.value.trim();
     if (v) send({ type: "rename", name: v });
-    row.remove();
+    restore();
   };
-  cancel.onclick = () => row.remove();
-  input.onkeydown = (e) => { if (e.key === "Enter") ok.click(); };
-  row.append(input, ok, cancel);
-  card.appendChild(row);
+  cancel.onclick = restore;
+  input.onkeydown = (e) => { if (e.key === "Enter") ok.click(); if (e.key === "Escape") restore(); };
+  function restore() {
+    $("setName").classList.remove("hidden");
+    $("renameBtn").classList.remove("hidden");
+    wrap.remove();
+  }
+  $("setName").classList.add("hidden");
+  $("renameBtn").classList.add("hidden");
+  wrap.append(input, ok, cancel);
+  row.appendChild(wrap);
   input.focus();
+  input.select();
 });
 
-/* ---------------------------------------------------------- devices */
+/* ================================================================== devices */
 
 function renderDevices() {
   const grid = $("deviceGrid");
-  const list = [...state.devices.values()].filter((d) => {
-    if (state.filter === "all") return true;
-    if (state.filter === "other") return d.platform !== "android" && d.platform !== "windows";
-    return d.platform === state.filter;
-  });
+  const all = [...state.devices.values()];
+  const list = all
+    .filter((d) => {
+      if (state.filter === "all") return true;
+      if (state.filter === "other") return d.platform !== "android" && d.platform !== "windows";
+      return d.platform === state.filter;
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
 
   $("emptyState").style.display = state.devices.size === 0 ? "" : "none";
   $("statDevices").textContent = state.devices.size;
-  $("statAndroid").textContent = [...state.devices.values()].filter((d) => d.platform === "android").length;
-  $("statWindows").textContent = [...state.devices.values()].filter((d) => d.platform === "windows").length;
+  $("devCount").textContent = state.devices.size === 0
+    ? ""
+    : `${state.devices.size} device${state.devices.size === 1 ? "" : "s"} on this network`;
+
+  /* Skip the DOM rebuild when nothing relevant changed — keeps buttons
+     stable for clicks/hovers across the periodic mDNS refresh cycle. */
+  const sig = list.map((d) => {
+    const s = state.sessions.get(d.id);
+    return `${d.id}|${d.name}|${d.platform}|${d.ip}:${d.port}|${d.last_seen ? 1 : 0}|${s ? s.dto.state : ""}`;
+  }).join(";") + `#f=${state.filter}`;
+  if (sig === renderDevices._sig) return;
+  renderDevices._sig = sig;
 
   grid.innerHTML = list
     .map((d) => {
-      const hasSession = state.sessions.has(d.id);
-      const btn = hasSession
-        ? `<button class="btn ghost" data-act="open" data-id="${esc(d.id)}">Open</button>`
-        : `<button class="btn" data-act="connect" data-id="${esc(d.id)}">Connect</button>`;
+      const s = state.sessions.get(d.id);
+      let btn;
+      if (s && s.dto.state === "established")
+        btn = `<button class="btn ghost" data-act="open" data-id="${esc(d.id)}">Open chat</button>`;
+      else if (s && s.dto.state === "connecting")
+        btn = `<button class="btn ghost" disabled>Handshaking…</button>`;
+      else if (s)
+        btn = `<button class="btn" data-act="connect" data-id="${esc(d.id)}">Reconnect</button>`;
+      else
+        btn = `<button class="btn" data-act="connect" data-id="${esc(d.id)}">Connect</button>`;
       return `
       <div class="device-card" data-card="${esc(d.id)}">
         <div class="dev-top">
           <span class="dev-icon">${ICONS[d.platform] || ICONS.unknown}</span>
           <div>
-            <div class="dev-name">${esc(d.name)}</div>
+            <div class="dev-name" title="${esc(d.name)}">${esc(d.name)}</div>
             <div class="dev-host dim mono">${esc(d.hostname)}</div>
           </div>
           <span class="platform-badge ${esc(d.platform)}">${LABEL[d.platform] || esc(d.platform)}</span>
@@ -199,13 +298,13 @@ $("deviceGrid").addEventListener("click", (e) => {
   if (!btn) return;
   const id = btn.dataset.id;
   if (btn.dataset.act === "connect") {
+    state.pendingConnect = id;
     send({ type: "connect", device_id: id });
     btn.disabled = true;
     btn.textContent = "Connecting…";
-    setTimeout(() => renderDevices(), 1200);
   } else {
-    const s = state.sessions.get(id);
-    if (s) s.el.scrollIntoView({ behavior: "smooth", block: "center" });
+    showPage("chats");
+    openChat(id);
   }
 });
 
@@ -217,7 +316,9 @@ $("filters").addEventListener("click", (e) => {
   renderDevices();
 });
 
-/* --------------------------------------------------------- sessions */
+$("refreshBtn").addEventListener("click", () => send({ type: "refresh" }));
+
+/* ================================================================== chats */
 
 function stateLabel(s) {
   if (s.direction === "in" && s.state === "connecting") return "HANDSHAKE ←";
@@ -226,69 +327,125 @@ function stateLabel(s) {
 
 function upsertSession(dto) {
   let s = state.sessions.get(dto.peer_id);
+  const fresh = !s;
   if (s) {
     s.dto = Object.assign({}, s.dto, dto);
   } else {
-    s = { dto, chatRendered: 0, els: {} };
+    s = { dto, unread: 0, _rendered: 0 };
     state.sessions.set(dto.peer_id, s);
-    buildSessionCard(s);
   }
-  if (dto.chat && dto.chat.length) {
-    // full history (new tab or new session): rebuild chat box FIRST,
-    // so updateSessionCard→renderTransfers re-attaches widgets after it
-    // instead of having them wiped by this rebuild.
-    s.chatRendered = 0;
-    s.els.chat.innerHTML = "";
-    for (const line of dto.chat) appendBubble(s, line);
-  }
-  updateSessionCard(s);
+
+  renderChatList();
   renderDevices();
+  $("statSessions").textContent = [...state.sessions.values()].filter(
+    (x) => x.dto.state === "established").length;
+
+  if (fresh) {
+    /* navigate to the conversation only when it is the one this user just
+       clicked Connect for — sessions replayed on page load (initial sync)
+       or inbound connections never yank the user around */
+    if (state.pendingConnect === dto.peer_id) {
+      state.pendingConnect = null;
+      showPage("chats");
+      openChat(dto.peer_id);
+    }
+  } else if (state.activePeer === dto.peer_id) {
+    updateChatView(s);
+  }
 }
 
-function buildSessionCard(s) {
+function lastLinePreview(s) {
+  const c = s.dto.chat || [];
+  if (!c.length) return stateLabel(s.dto).toLowerCase();
+  const l = c[c.length - 1];
+  const who = l.dir === "out" ? "you: " : l.dir === "in" ? "" : "";
+  return who + l.text;
+}
+
+function renderChatList() {
+  const listEl = $("chatList");
+  const items = [...state.sessions.values()].sort((a, b) => {
+    const la = (a.dto.chat || []).length, lb = (b.dto.chat || []).length;
+    return lb - la;
+  });
+  $("chatsEmpty").style.display = items.length === 0 ? "" : "none";
+  listEl.querySelectorAll(".chat-item").forEach((el) => el.remove());
+  for (const s of items) {
+    const d = s.dto;
+    const btn = document.createElement("button");
+    btn.className = "chat-item" + (state.activePeer === d.peer_id ? " active" : "");
+    btn.dataset.peer = d.peer_id;
+    btn.innerHTML = `
+      <span class="dev-icon">${ICONS[d.peer_platform] || ICONS.unknown}</span>
+      <span class="grow">
+        <span class="ci-name">${esc(d.peer_name)}</span>
+        <span class="ci-sub">${esc(lastLinePreview(s).slice(0, 42))}</span>
+      </span>
+      ${s.unread ? `<span class="ci-unread">${s.unread}</span>` : ""}`;
+    btn.onclick = () => openChat(d.peer_id);
+    listEl.appendChild(btn);
+  }
+}
+
+$("chatList").addEventListener("click", (e) => {
+  const btn = e.target.closest(".chat-item");
+  if (btn) openChat(btn.dataset.peer);
+});
+
+function openChat(peerId) {
+  const s = state.sessions.get(peerId);
+  if (!s) return;
+  state.activePeer = peerId;
+  s.unread = 0;
+  updateNavBadge();
+
   const d = s.dto;
-  const card = document.createElement("div");
-  card.className = "session-card";
-  card.innerHTML = `
-    <div class="sess-head">
+  $("chatPlaceholder").classList.add("hidden");
+  const main = $("chatMain");
+  const old = main.querySelector(".chat-view");
+  if (old) old.remove();
+
+  const view = document.createElement("div");
+  view.className = "chat-view";
+  view.innerHTML = `
+    <header class="chat-head">
       <span class="dev-icon">${ICONS[d.peer_platform] || ICONS.unknown}</span>
       <div class="grow">
-        <div class="sess-name">${esc(d.peer_name)}</div>
-        <div class="sess-addr dim mono">${d.direction === "in" ? "←" : "→"} ${esc(d.peer_addr)}</div>
+        <div class="chat-title">${esc(d.peer_name)}</div>
+        <div class="chat-sub mono">${d.direction === "in" ? "←" : "→"} ${esc(d.peer_addr)}</div>
       </div>
       <span class="state-chip ${esc(d.state)}"></span>
       <span class="rtt-badge hidden"></span>
+      <button class="hs-toggle" data-act="hs" title="Show / hide the TCP handshake timeline">handshake</button>
       <button class="icon-btn" title="Send BYE and close" data-act="close">✕</button>
-    </div>
+    </header>
     <div class="hs-timeline"></div>
     <div class="chat"></div>
-    <div class="chat-input">
+    <footer class="chat-input">
       <input type="text" placeholder="Message ${esc(d.peer_name)}…" maxlength="2000">
+      <button class="icon-btn" data-act="file" title="Send a file" style="color:var(--accent)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+      </button>
       <button class="btn" data-act="send">Send</button>
-      <button class="btn ghost" data-act="file" title="Send a file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
-    </div>`;
+    </footer>`;
 
-  const chatEl = card.querySelector(".chat");
-  const input = card.querySelector("input");
-
-  card.querySelector('[data-act="close"]').onclick = () => {
+  const input = view.querySelector("input");
+  view.querySelector('[data-act="close"]').onclick = () =>
     send({ type: "disconnect", session_id: d.peer_id });
-  };
-  card.querySelector('[data-act="send"]').onclick = () => submitChat(s, input);
+  view.querySelector('[data-act="send"]').onclick = () => submitChat(s, input);
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") submitChat(s, input);
   });
-  card.querySelector('[data-act="file"]').onclick = () => pickFile(s);
-
-  s.els = {
-    root: card,
-    chip: card.querySelector(".state-chip"),
-    rtt: card.querySelector(".rtt-badge"),
-    timeline: card.querySelector(".hs-timeline"),
-    chat: chatEl,
-    input,
+  view.querySelector('[data-act="file"]').onclick = () => pickFile(s);
+  view.querySelector('[data-act="hs"]').onclick = (e) => {
+    s.hsUser = true;
+    s.showHs = !s.showHs;
+    updateHsToggle(s, view);
   };
-  $("sessionList").appendChild(card);
+
+  main.appendChild(view);
+  renderChatList();
+  updateChatView(s, true);
 }
 
 function submitChat(s, input) {
@@ -297,44 +454,73 @@ function submitChat(s, input) {
   if (send({ type: "chat", device_id: s.dto.peer_id, text })) input.value = "";
 }
 
-function updateSessionCard(s) {
+function updateChatView(s, fullRebuild = false) {
+  const view = $("chatMain").querySelector(".chat-view");
+  if (!view) return;
   const d = s.dto;
-  $("sessionsEmpty").style.display = state.sessions.size === 0 ? "" : "none";
-  $("statSessions").textContent = [...state.sessions.values()].filter(
-    (x) => x.dto.state === "established").length;
 
-  s.els.chip.textContent = stateLabel(d);
-  s.els.chip.className = "state-chip " + d.state;
-  if (d.error) s.els.chip.title = d.error;
+  const chip = view.querySelector(".state-chip");
+  chip.textContent = stateLabel(d);
+  chip.className = "state-chip " + d.state;
+  if (d.error) chip.title = d.error;
 
+  const rtt = view.querySelector(".rtt-badge");
   if (d.rtt_ms != null) {
-    s.els.rtt.classList.remove("hidden");
-    s.els.rtt.textContent = `RTT ${d.rtt_ms} ms`;
+    rtt.classList.remove("hidden");
+    rtt.textContent = `RTT ${d.rtt_ms} ms`;
   }
-  s.els.input.disabled = d.state !== "established";
 
-  // handshake timeline
-  const stepsHtml = d.steps
+  view.querySelector(".chat-input input").disabled = d.state !== "established";
+
+  /* handshake disclosure: visible while connecting (interesting to watch),
+     auto-collapsed once established unless the user pinned it open */
+  if (!s.hsUser) s.showHs = d.state === "connecting";
+  updateHsToggle(s, view);
+
+  /* handshake timeline */
+  const stepsHtml = (d.steps || [])
     .map((st) => {
       const cls =
         st.step === "established" ? "established" :
-        st.step === "fail" ? "fail" :
-        st.ms != null || st.step === "hello-ack" ? "done" : "done";
+        st.step === "fail" ? "fail" : "done";
       const ms = st.ms != null ? ` · ${Number(st.ms).toFixed(1)} ms` : "";
       return `<span class="hs-step ${cls}" title="${esc(st.detail)}">${esc(st.label)}${ms}</span>`;
     })
     .join('<span class="hs-arrow">→</span>');
-  const lastDetail = d.steps.length ? d.steps[d.steps.length - 1].detail : "";
-  s.els.timeline.innerHTML =
+  const lastDetail = (d.steps || []).length ? d.steps[d.steps.length - 1].detail : "";
+  view.querySelector(".hs-timeline").innerHTML =
     stepsHtml +
     (lastDetail ? `<div class="hs-detail">${esc(lastDetail)}</div>` : "") +
     (d.error ? `<div class="hs-detail" style="color:var(--err)">${esc(d.error)}</div>` : "");
 
-  renderTransfers(s);
+  /* chat history — rebuild when the known length changed (open or echo) */
+  const chatEl = view.querySelector(".chat");
+  const chatLen = (d.chat || []).length;
+  if (fullRebuild || chatLen !== s._rendered) {
+    chatEl.innerHTML = "";
+    if (chatLen === 0) {
+      const hint = document.createElement("div");
+      hint.className = "bubble sys hint";
+      hint.textContent = "start of the conversation — say hi or attach a file";
+      chatEl.appendChild(hint);
+    }
+    for (const line of d.chat || []) appendBubble(s, line, chatEl);
+    s._rendered = chatLen;
+  }
+  renderTransfers(s, chatEl);
 }
 
-function appendBubble(s, line) {
-  const chat = s.els.chat;
+function updateHsToggle(s, view) {
+  const tl = view.querySelector(".hs-timeline");
+  const btn = view.querySelector('[data-act="hs"]');
+  tl.classList.toggle("collapsed", !s.showHs);
+  btn.classList.toggle("on", !!s.showHs);
+  btn.textContent = s.showHs ? "handshake ⌃" : "handshake ⌄";
+}
+
+function appendBubble(s, line, chatEl) {
+  const chat = chatEl || $("chatMain").querySelector(".chat-view .chat");
+  if (!chat) return;
   const div = document.createElement("div");
   const time = new Date(line.ts).toLocaleTimeString();
   if (line.dir === "sys") {
@@ -350,15 +536,15 @@ function appendBubble(s, line) {
   }
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
-  s.chatRendered++;
 }
 
-/* ------------------------------------------------------ file events */
+/* ================================================================== file events */
 
-function renderTransfers(s) {
-  // Reconcile transfer widgets inside the chat box from session.transfers.
+function renderTransfers(s, chatEl) {
+  const chat = chatEl || $("chatMain").querySelector(".chat-view .chat");
+  if (!chat) return;
   for (const t of s.dto.transfers || []) {
-    let el = s.els.chat.querySelector(`[data-tid="${CSS.escape(t.tid)}"]`);
+    let el = chat.querySelector(`[data-tid="${CSS.escape(t.tid)}"]`);
     if (!el) {
       el = document.createElement("div");
       el.className = "transfer";
@@ -369,8 +555,8 @@ function renderTransfers(s) {
           <span class="t-status"></span>
         </div>
         <div class="bar"><div class="fill"></div></div>`;
-      s.els.chat.appendChild(el);
-      s.els.chat.scrollTop = s.els.chat.scrollHeight;
+      chat.appendChild(el);
+      chat.scrollTop = chat.scrollHeight;
     }
     const pct = t.total > 0 ? Math.min(100, Math.round((t.bytes / t.total) * 100)) : 0;
     el.querySelector(".fill").style.width = pct + "%";
@@ -385,17 +571,19 @@ function renderTransfers(s) {
 function handleFileEvent(peerId, ev) {
   const s = state.sessions.get(peerId);
   if (!s) return;
+  if (!s.dto.chat) s.dto.chat = [];
   if (ev.status === "start") {
-    appendBubble(s, { dir: "sys", text: `↓ ${ev.detail}`, ts: Date.now() });
-  } else if (ev.status === "done" || ev.status === "error") {
-    if (ev.status === "done" && ev.direction === "in" && ev.detail) {
-      appendBubble(s, { dir: "sys", text: `✓ saved → ${ev.detail}`, ts: Date.now() });
-    }
+    s.dto.chat.push({ dir: "sys", text: `↓ ${ev.detail}`, ts: Date.now() });
+  } else if (ev.status === "done" && ev.direction === "in" && ev.detail) {
+    s.dto.chat.push({ dir: "sys", text: `✓ saved → ${ev.detail}`, ts: Date.now() });
+  } else if (ev.status === "error") {
+    s.dto.chat.push({ dir: "sys", text: `✗ ${ev.detail || "transfer failed"}`, ts: Date.now() });
   }
-  // progress is rendered via session.transfers updates
+  if (state.activePeer === peerId) updateChatView(s);
+  renderChatList();
 }
 
-/* ------------------------------------------------------ file pickup */
+/* ============================================================ file pickup */
 
 let fileTargetSession = null;
 $("filePicker").addEventListener("change", async (e) => {
@@ -425,14 +613,19 @@ async function sendFile(s, file) {
   }
 
   send({ type: "file-begin", device_id: peerId, tid, name: file.name, size: file.size, sha256: sha });
-  appendBubble(s, { dir: "sys", text: `↑ sending “${file.name}” (${fmtBytes(file.size)})…`, ts: Date.now() });
+  if (!s.dto.chat) s.dto.chat = [];
+  s.dto.chat.push({ dir: "sys", text: `↑ sending “${file.name}” (${fmtBytes(file.size)})…`, ts: Date.now() });
+  if (state.activePeer === peerId) {
+    const chatEl = $("chatMain").querySelector(".chat-view .chat");
+    appendBubble(s, s.dto.chat[s.dto.chat.length - 1], chatEl);
+    s._rendered = s.dto.chat.length;
+  }
 
   const CHUNK = 48 * 1024;
   for (let seq = 0, off = 0; off < buf.length; seq++, off += CHUNK) {
     const slice = buf.subarray(off, Math.min(off + CHUNK, buf.length));
     send({ type: "file-chunk", device_id: peerId, tid, seq, data: bufToB64(slice) });
-    // gentle pacing so the WS + TCP writer can keep up
-    await sleep(4);
+    await sleep(4);   /* gentle pacing so the WS + TCP writer can keep up */
   }
   send({ type: "file-end", device_id: peerId, tid });
 }
@@ -446,15 +639,28 @@ function bufToB64(bytes) {
   return btoa(bin);
 }
 
-/* ------------------------------------------------------------- log */
+/* ================================================================== badge */
+
+function updateNavBadge() {
+  const total = [...state.sessions.values()].reduce((n, s) => n + (s.unread || 0), 0);
+  const badge = $("navBadge");
+  badge.textContent = total > 99 ? "99+" : total;
+  badge.classList.toggle("hidden", total === 0);
+}
+
+/* ================================================================== log */
 
 function appendLog(level, msg, ts) {
+  state.logCount++;
+  $("statLogs").textContent = state.logCount;
   if (state.paused) return;
   const box = $("console");
   const div = document.createElement("div");
   div.className = "log-line";
+  div.dataset.lvl = level;
   const time = new Date(ts || Date.now()).toLocaleTimeString();
   div.innerHTML = `<span class="log-ts">${time}</span><span class="log-lvl ${esc(level)}">${esc(level)}</span><span class="log-msg">${esc(msg)}</span>`;
+  if (state.logLvl !== "all" && level !== state.logLvl) div.classList.add("hidden");
   box.appendChild(div);
   while (box.children.length > 250) box.removeChild(box.firstChild);
   box.scrollTop = box.scrollHeight;
@@ -464,9 +670,23 @@ $("pauseLog").addEventListener("click", () => {
   state.paused = !state.paused;
   $("pauseLog").textContent = state.paused ? "Resume" : "Pause";
 });
-$("clearLog").addEventListener("click", () => ($("console").innerHTML = ""));
+$("clearLog").addEventListener("click", () => {
+  $("console").innerHTML = "";
+  state.logCount = 0;
+  $("statLogs").textContent = "0";
+});
 
-/* ---------------------------------------------------------- tickers */
+$("logFilters").addEventListener("click", (e) => {
+  const chip = e.target.closest(".chip");
+  if (!chip) return;
+  state.logLvl = chip.dataset.lvl;
+  document.querySelectorAll("#logFilters .chip").forEach((c) => c.classList.toggle("active", c === chip));
+  $("console").querySelectorAll(".log-line").forEach((el) => {
+    el.classList.toggle("hidden", state.logLvl !== "all" && el.dataset.lvl !== state.logLvl);
+  });
+});
+
+/* ================================================================== tickers */
 
 setInterval(() => {
   document.querySelectorAll("[data-seen]").forEach((el) => {
@@ -485,7 +705,7 @@ setInterval(() => {
   }
 }, 15000);
 
-/* ------------------------------------------------------------- misc */
+/* ================================================================== misc */
 
 function fmtBytes(n) {
   if (n < 1024) return n + " B";
@@ -496,7 +716,14 @@ function fmtBytes(n) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/* ------------------------------------------------------------- boot */
+/* ================================================================== boot */
 
-connect();
-appendLog("info", "dashboard booted — connecting to control channel…", Date.now());
+(function boot() {
+  $("verTag").textContent = "v" + APP_VERSION;
+  $("setVer").textContent = "v" + APP_VERSION;
+  const saved = localStorage.getItem(THEME_KEY) || "dark";
+  setTheme(saved);
+  showPage("devices");
+  connect();
+  appendLog("info", "dashboard booted — connecting to control channel…", Date.now());
+})();

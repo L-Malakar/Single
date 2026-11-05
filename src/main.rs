@@ -59,7 +59,7 @@ async fn main() -> Result<(), DynError> {
     let self_identity = Arc::new(RwLock::new(identity));
 
     println!(
-        "\n{APP_NAME} v{APP_VERSION} - mDNS LAN control server\n\
+        "\n  {APP_NAME} v{APP_VERSION} - mDNS LAN control server\n\
          ─────────────────────────────────────────────────────\n\
          identity  : {name} [{platform}] @ {ip}\n\
          dashboard : http://{ip}:{http_port}\n\

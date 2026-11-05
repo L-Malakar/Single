@@ -65,23 +65,36 @@ registration lets you watch them pop into the dashboard one by one.
 On a real Wi-Fi, simply run `p2p-bridge-server` on every machine you want to
 see — each instance broadcasts and browses the same service type.
 
+### The dashboard
+
+The UI is a multi-page app in the spirit of LocalSend: a left navigation rail
+with four focused pages instead of one dense control panel.
+
+| page | what lives there |
+| --- | --- |
+| **Devices** | *this device* identity card, the nearby-device grid (mDNS), platform filters, Connect |
+| **Chats** | conversation list + one conversation per device: bubbles, RTT badge, file transfers, collapsible handshake timeline |
+| **Activity** | uptime/devices/sessions stats and the live server log with level filters |
+| **Settings** | device name (rename), dark/light/system theme, network info, firewall help, about |
+
 ### Demo walkthrough
 
-1. **Devices appear** in the left panel as mDNS resolves them (platform badge
+1. **Devices appear** on the Devices page as mDNS resolves them (platform badge
    comes from the `platform=` TXT record). Filter with the All / Android /
    Windows / Other chips.
-2. Click **Connect ⇄** — the right panel opens a session card and replays the
-   application-level handshake timeline:
+2. Click **Connect** — you are taken to Chats, a conversation opens, and the
+   handshake timeline replays while connecting:
    `TCP connect (kernel SYN/SYN-ACK/ACK) → HELLO → HELLO_ACK → ACK → ESTABLISHED`,
-   with per-step timings and nonce echoes (TCP sequence-number style).
-3. Once established: **chat** (bubbles), **RTT** badge (PING/PONG every 3 s),
-   and **📎 file transfer** (48 KB base64 chunks, SHA-256 verified end-to-end;
-   received files land in `received/`).
-4. Rename your device from the header (**✏️**) — the server un-registers and
+   with per-step timings. It auto-collapses once established (reopen with the
+   *handshake* toggle).
+3. Once established: **chat** (bubbles, Enter to send), **RTT** badge
+   (PING/PONG), and **📎 file transfer** (48 KB base64 chunks, SHA-256
+   verified end-to-end; received files land in `received/`). Unread messages
+   badge the Chats nav item.
+4. Rename your device in **Settings → Identity** — the server un-registers and
    re-registers its mDNS service; peers see you leave and rejoin under the new
    name.
-5. The **activity log** at the bottom streams every mDNS event, handshake, and
-   transfer from the server.
+5. Every mDNS event, handshake and transfer streams into **Activity**.
 
 ---
 
@@ -224,13 +237,14 @@ Linux: `sudo ufw allow 5353/udp && sudo ufw allow 3000/tcp && sudo ufw allow 505
 ```
 p2p-bridge/
 ├── build.bat               # release build + package the Single app folder
+├── build.rs                # embeds static/logo.ico into the Windows exes
 ├── Cargo.toml
-├── static/                  # embedded single-page dashboard
-│   ├── index.html
+├── static/                  # embedded multi-page dashboard (LocalSend-style)
+│   ├── index.html           # app shell: sidebar + Devices/Chats/Activity/Settings
 │   ├── logo.svg             # app logo (favicon + header), accent-colored
-│   ├── logo.ico             # Windows exe/taskbar icon (embedded via build.rs)
-│   ├── style.css            # Apple-inspired dark theme (materials, hairlines, iMessage chat)
-│   └── app.js               # vanilla-JS WebSocket client
+│   ├── logo.ico             # Windows exe/taskbar icon
+│   ├── style.css            # design system, dark + light themes
+│   └── app.js               # vanilla-JS page router + WebSocket client
 └── src/
     ├── main.rs              # p2p-bridge-server: wiring & startup
     ├── lib.rs

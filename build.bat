@@ -124,6 +124,12 @@ rem  -- README.txt -------------------------------------------------------------
 >> "%DIST%\README.txt" echo      No browser address to type, nothing else to start.
 >> "%DIST%\README.txt" echo   4. Quit: focus the console window and press Ctrl+C, or close it.
 >> "%DIST%\README.txt" echo.
+>> "%DIST%\README.txt" echo THE APP
+>> "%DIST%\README.txt" echo   Devices    nearby devices on this Wi-Fi - click Connect to reach one
+>> "%DIST%\README.txt" echo   Chats      conversations, file transfers and latency per device
+>> "%DIST%\README.txt" echo   Activity   live server log and stats
+>> "%DIST%\README.txt" echo   Settings   your name, theme, network info and firewall help
+>> "%DIST%\README.txt" echo.
 >> "%DIST%\README.txt" echo FILES IN THIS FOLDER
 >> "%DIST%\README.txt" echo   %EXE_NAME%      the app
 >> "%DIST%\README.txt" echo   Launch %APP_NAME%.bat      same thing, friendly starter
@@ -192,4 +198,3 @@ exit /b 1
 echo Press any key to close this window ...
 pause >nul
 exit /b 0
-
