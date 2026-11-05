@@ -1,6 +1,6 @@
 /* Single — dashboard client.
  *
- * Multi-page SPA: Devices · Chats · Activity · Settings (see index.html).
+ * Multi-page SPA: Home · Devices · Chats · Activity · Settings (see index.html).
  * The WebSocket protocol is unchanged (see src/protocol.rs):
  *   ← hello {self_identity, service_type}
  *   ← devices {devices:[…]}          live mDNS registry
@@ -8,7 +8,11 @@
  *   ← chat {peer_id, line}           one chat line
  *   ← file {peer_id, event}          transfer progress
  *   ← log {level, msg}               server activity
- *   → ping / refresh / rename / connect / disconnect / chat / file-*
+ *   ← access-state {mode, has_password}   inbound policy (Home › Protocol)
+ *   ← connect-request {id, name, …}       Private-mode approval prompt
+ *   → ping / refresh / rename / connect {device_id, password?}
+ *     disconnect / chat / file-* / set-access {mode, password}
+ *     connect-reply {id, accept}
  */
 
 "use strict";
@@ -40,13 +44,18 @@ const state = {
   sessions: new Map(),      // peer_id → { dto, unread }
   activePeer: null,
   filter: "all",
-  page: "devices",
+  page: "home",
   paused: false,
   logLvl: "all",
   logCount: 0,
   reconnectSec: 1,
   wsPingSent: 0,
   pendingConnect: null,
+  /* Home › Protocol — inbound connection policy (mirrored on the server) */
+  access: { mode: "private", password: "" },
+  reqQueue: [],             // pending Private-mode connect-requests
+  passFor: null,            // peer awaiting a Protected-mode password
+  devicePasswords: {},      // peer_id → last working password (prefill only)
 };
 
 /* ================================================================== pages */
@@ -61,6 +70,118 @@ $("sideNav").addEventListener("click", (e) => {
   const btn = e.target.closest(".nav-item");
   if (btn) showPage(btn.dataset.page);
 });
+
+/* ============================================================ sidebar collapse
+   YouTube-style: the rail shrinks to icons only; the choice persists.
+   (≤980 px the rail is always icon-only — see style.css.) */
+
+const SIDE_KEY = "single-side";
+
+function applySide(mini) {
+  document.body.classList.toggle("side-mini", !!mini);
+  document.documentElement.classList.toggle("side-mini", !!mini);
+}
+
+$("sideToggle").addEventListener("click", () => {
+  const mini = !document.body.classList.contains("side-mini");
+  applySide(mini);
+  try { localStorage.setItem(SIDE_KEY, mini ? "mini" : "full"); } catch {}
+});
+
+/* Collapsed rail: the logo itself brings the menu back — no separate extend button. */
+$("sideLogoBtn").addEventListener("click", () => {
+  if (!document.body.classList.contains("side-mini")) return; /* expanded → the logo is just a logo */
+  applySide(false);
+  try { localStorage.setItem(SIDE_KEY, "full"); } catch {}
+});
+
+/* ================================================================== access */
+
+const ACCESS_KEY = "single-access";
+
+function loadAccess() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(ACCESS_KEY) || "{}");
+    if (AccessModes.has(saved.mode)) state.access.mode = saved.mode;
+    if (typeof saved.password === "string") state.access.password = saved.password;
+  } catch {}
+}
+
+function saveAccess() {
+  try { localStorage.setItem(ACCESS_KEY, JSON.stringify(state.access)); } catch {}
+}
+
+const AccessModes = new Set(["public", "private", "protected"]);
+
+function sendAccess() {
+  send({ type: "set-access", mode: state.access.mode, password: state.access.password });
+}
+
+function renderAccess() {
+  document.querySelectorAll("#protocolSeg .chip").forEach((c) =>
+    c.classList.toggle("active", c.dataset.m === state.access.mode));
+  const hints = {
+    public: "Any device on this Wi-Fi can connect to you directly.",
+    private: "Devices must ask for your approval before they can connect.",
+    protected: "Any device can connect — but only with your password.",
+  };
+  const h = hints[state.access.mode] || "";
+  $("protoHint").textContent =
+    state.access.mode === "protected" && !state.access.password
+      ? "Choose a password and press Save to enable Protected mode."
+      : h;
+  $("protoPassRow").classList.toggle("hidden", state.access.mode !== "protected");
+  updateHome();
+}
+
+$("protocolSeg").addEventListener("click", (e) => {
+  const chip = e.target.closest(".chip");
+  if (!chip) return;
+  state.access.mode = chip.dataset.m;
+  renderAccess();
+  if (state.access.mode === "protected" && !state.access.password) {
+    $("protoPass").focus();
+    return; // wait for a password before telling the server
+  }
+  sendAccess();
+});
+
+function saveProtocolPassword() {
+  const pw = $("protoPass").value.trim();
+  if (!pw) { $("protoPass").focus(); return; }
+  state.access.password = pw;
+  saveAccess();
+  sendAccess();
+  renderAccess();
+}
+$("protoPassSave").addEventListener("click", saveProtocolPassword);
+$("protoPass").addEventListener("keydown", (e) => { if (e.key === "Enter") saveProtocolPassword(); });
+
+/* Server acknowledges (also pushed on every reconnect) */
+function applyAccess(msg) {
+  if (AccessModes.has(msg.mode)) state.access.mode = msg.mode;
+  saveAccess();
+  renderAccess();
+}
+
+/* ================================================================== home */
+
+$("homeNameBtn").addEventListener("click", () => showPage("settings"));
+$("findBtn").addEventListener("click", () => showPage("devices"));
+
+function updateHome() {
+  if (!state.self) return;
+  $("homeName").textContent = state.self.name;
+  const n = state.devices.size;
+  const established = [...state.sessions.values()].filter((s) => s.dto.state === "established").length;
+  const bits = [
+    `${state.self.ip}:${state.self.p2p_port}`,
+    n === 0 ? "scanning for devices…" : `${n} device${n === 1 ? "" : "s"} nearby`,
+  ];
+  if (established > 0) bits.push(`${established} connected`);
+  bits.push(`protocol: ${state.access.mode}`);
+  $("homeSub").textContent = bits.join("  ·  ");
+}
 
 /* ================================================================== theme */
 
@@ -99,6 +220,9 @@ function connect() {
     setWsStatus("on", "live");
     $("reconnectBanner").classList.add("hidden");
     state.reconnectSec = 1;
+    /* re-apply the persisted Protocol choice — the server keeps it in memory
+       only, so every fresh dashboard session re-teaches it */
+    sendAccess();
   };
   ws.onclose = () => {
     setWsStatus("off", "offline");
@@ -166,6 +290,13 @@ function handle(msg) {
     case "log":
       appendLog(msg.level, msg.msg, msg.ts);
       break;
+    case "access-state":
+      applyAccess(msg);
+      break;
+    case "connect-request":
+      state.reqQueue.push(msg);
+      showNextRequest();
+      break;
     case "pong":
       $("wsRtt").textContent = (Date.now() - state.wsPingSent) + " ms";
       break;
@@ -195,6 +326,9 @@ function renderSelf() {
   $("setP2p").textContent = String(state.self.p2p_port);
   $("setHttp").textContent = location.host;
   $("setSvc").textContent = state.serviceType;
+
+  /* home page */
+  updateHome();
 }
 
 /* rename — inline editor inside Settings › Identity */
@@ -251,6 +385,7 @@ function renderDevices() {
   $("devCount").textContent = state.devices.size === 0
     ? ""
     : `${state.devices.size} device${state.devices.size === 1 ? "" : "s"} on this network`;
+  updateHome();
 
   /* Skip the DOM rebuild when nothing relevant changed — keeps buttons
      stable for clicks/hovers across the periodic mDNS refresh cycle. */
@@ -339,6 +474,11 @@ function upsertSession(dto) {
   renderDevices();
   $("statSessions").textContent = [...state.sessions.values()].filter(
     (x) => x.dto.state === "established").length;
+
+  /* Protected-mode peer: it answered auth-required — ask for the password */
+  if (dto.state === "error" && dto.error && dto.error.indexOf("auth-required") === 0) {
+    askPassword(dto.peer_id);
+  }
 
   if (fresh) {
     /* navigate to the conversation only when it is the one this user just
@@ -648,6 +788,78 @@ function updateNavBadge() {
   badge.classList.toggle("hidden", total === 0);
 }
 
+/* ================================================================== connect requests
+   Private mode: the server holds the handshake open until we decide. */
+
+function showNextRequest() {
+  const modal = $("reqModal");
+  const r = state.reqQueue[0];
+  if (!r) {
+    modal.classList.add("hidden");
+    return;
+  }
+  $("reqIcon").innerHTML = ICONS[r.platform] || ICONS.unknown;
+  $("reqName").textContent = r.name;
+  $("reqAddr").textContent = r.addr;
+  $("reqPlatform").textContent = LABEL[r.platform] || r.platform;
+  $("reqPlatform").className = "platform-badge " + r.platform;
+  modal.classList.remove("hidden");
+  /* mirror the server's 30 s approval window — expire locally too */
+  clearTimeout(showNextRequest._timer);
+  showNextRequest._timer = setTimeout(() => {
+    if (state.reqQueue[0] === r) {
+      state.reqQueue.shift();
+      showNextRequest();
+    }
+  }, 31000);
+}
+
+function answerRequest(accept) {
+  const r = state.reqQueue.shift();
+  if (r) send({ type: "connect-reply", id: r.id, accept });
+  showNextRequest();
+}
+$("reqAccept").addEventListener("click", () => answerRequest(true));
+$("reqDecline").addEventListener("click", () => answerRequest(false));
+
+/* ================================================================== protected peers
+   The remote replied auth-required → collect the password and retry. */
+
+function askPassword(peerId) {
+  if (!peerId || state.passFor === peerId && !$("passModal").classList.contains("hidden")) return;
+  const dev = state.devices.get(peerId);
+  state.passFor = peerId;
+  $("passPeer").textContent = dev
+    ? `“${dev.name}” is protected — enter its connection password.`
+    : "This device is protected — enter its connection password.";
+  $("passInput").value = state.devicePasswords[peerId] || "";
+  $("passModal").classList.remove("hidden");
+  $("passInput").focus();
+  $("passInput").select();
+}
+
+function submitPassword() {
+  const id = state.passFor;
+  const pw = $("passInput").value;
+  $("passModal").classList.add("hidden");
+  state.passFor = null;
+  if (!id || !pw) return;
+  state.devicePasswords[id] = pw;
+  try { localStorage.setItem("single-device-pw", JSON.stringify(state.devicePasswords)); } catch {}
+  state.pendingConnect = id;
+  send({ type: "connect", device_id: id, password: pw });
+}
+
+$("passGo").addEventListener("click", submitPassword);
+$("passCancel").addEventListener("click", () => {
+  $("passModal").classList.add("hidden");
+  state.passFor = null;
+});
+$("passInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") submitPassword();
+  if (e.key === "Escape") $("passCancel").click();
+});
+
 /* ================================================================== log */
 
 function appendLog(level, msg, ts) {
@@ -723,7 +935,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   $("setVer").textContent = "v" + APP_VERSION;
   const saved = localStorage.getItem(THEME_KEY) || "dark";
   setTheme(saved);
-  showPage("devices");
+  loadAccess();
+  renderAccess();
+  try { state.devicePasswords = JSON.parse(localStorage.getItem("single-device-pw") || "{}"); } catch {}
+  applySide(localStorage.getItem(SIDE_KEY) === "mini");
+  showPage("home");
   connect();
   appendLog("info", "dashboard booted — connecting to control channel…", Date.now());
 })();

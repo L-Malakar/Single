@@ -6,6 +6,7 @@
 //! - `GET /ws`      — WebSocket control channel (live devices / sessions / chat / files)
 //! - `GET /api/health` — JSON status probe
 
+use crate::access::AccessControl;
 use crate::config::{Config, SERVICE_TYPE};
 use crate::mdns::Mdns;
 use crate::p2p::P2pManager;
@@ -39,6 +40,7 @@ pub struct AppState {
     pub mdns: Arc<Mdns>,
     pub self_identity: Arc<RwLock<Identity>>,
     pub p2p: Arc<P2pManager>,
+    pub access: Arc<AccessControl>,
     pub started: std::time::Instant,
 }
 
@@ -107,6 +109,7 @@ async fn health(State(st): State<Arc<AppState>>) -> impl IntoResponse {
         "devices_discovered": st.registry.snapshot().len(),
         "p2p_sessions": st.p2p.session_count(),
         "p2p_established": st.p2p.established_count(),
+        "access_mode": st.access.mode().as_str(),
     }))
 }
 
@@ -175,6 +178,11 @@ async fn ws_session(socket: WebSocket, st: Arc<AppState>) {
             .send(Message::Text(serde_json::to_string(&ServerMsg::Session { session }).unwrap().into()))
             .await;
     }
+    // Inbound connection policy (Home › Protocol) — the browser mirrors it
+    // into localStorage and re-applies it on every reconnect.
+    let _ = tx
+        .send(Message::Text(serde_json::to_string(&st.access.snapshot()).unwrap().into()))
+        .await;
 
     loop {
         tokio::select! {
@@ -260,12 +268,24 @@ async fn handle_client(st: &Arc<AppState>, msg: ClientMsg, tx: &mut SplitSink<We
                 format!("renamed — now broadcasting as “{name}” ({SERVICE_TYPE})"),
             );
         }
-        ClientMsg::Connect { device_id } => match st.registry.get(&device_id) {
-            Some(device) => st.p2p.connect_to(&device),
+        ClientMsg::Connect { device_id, password } => match st.registry.get(&device_id) {
+            Some(device) => st.p2p.connect_to(&device, &password),
             None => {
                 log_bus(&st.bus, "warn", "connect: device no longer in registry");
             }
         },
+        ClientMsg::SetAccess { mode, password } => {
+            if let Err(e) = st.access.set(&mode, &password) {
+                log_bus(&st.bus, "warn", format!("protocol change rejected: {e}"));
+            }
+            // Always echo the current policy so the dashboard self-corrects.
+            let _ = st.bus.send(st.access.snapshot());
+        }
+        ClientMsg::ConnectReply { id, accept } => {
+            if !st.access.respond(&id, accept) {
+                log_bus(&st.bus, "warn", "connect reply arrived after the request expired");
+            }
+        }
         ClientMsg::Disconnect { session_id } => {
             st.p2p.disconnect(&session_id);
         }

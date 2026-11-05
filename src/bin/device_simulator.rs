@@ -309,6 +309,7 @@ async fn respond(
                 name,
                 id: String::new(),
                 platform: String::new(),
+                password: String::new(),
             }
         }
         _ => {

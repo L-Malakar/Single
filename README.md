@@ -68,20 +68,40 @@ see — each instance broadcasts and browses the same service type.
 ### The dashboard
 
 The UI is a multi-page app in the spirit of LocalSend: a left navigation rail
-with four focused pages instead of one dense control panel.
+(collapse it to icons with the chevron button; while collapsed, the app logo
+itself expands it back — YouTube-style) with five
+focused pages instead of one dense control panel.
 
 | page | what lives there |
 | --- | --- |
+| **Home** | LocalSend-style landing: big app logo, your device name (tap to rename in Settings), a **Find devices** button, and the **Protocol** switch |
 | **Devices** | *this device* identity card, the nearby-device grid (mDNS), platform filters, Connect |
 | **Chats** | conversation list + one conversation per device: bubbles, RTT badge, file transfers, collapsible handshake timeline |
 | **Activity** | uptime/devices/sessions stats and the live server log with level filters |
 | **Settings** | device name (rename), dark/light/system theme, network info, firewall help, about |
 
+### Protocol — inbound connection policy
+
+The Home page's Protocol switch (Public / Private / Protected, default
+**Private**) decides how other devices may open a P2P channel with you:
+
+- **Public** — any device on the Wi-Fi connects directly.
+- **Private** — every inbound handshake pauses and the dashboard pops an
+  *Accept / Decline* dialog; no answer within 30 s counts as a decline. The
+  initiating side simply sees the handshake wait, then succeed or fail.
+- **Protected** — any device may connect, but its HELLO frame must carry the
+  password you set. A wrong/missing password is rejected with `reason:"auth"`,
+  and the initiating dashboard pops a password dialog and retries.
+
+The choice is stored in the browser (localStorage) and re-applied to the
+server on every dashboard reconnect; the password itself lives in server
+memory only.
+
 ### Demo walkthrough
 
 1. **Devices appear** on the Devices page as mDNS resolves them (platform badge
    comes from the `platform=` TXT record). Filter with the All / Android /
-   Windows / Other chips.
+   Windows / Other chips. (Land on **Home** first — tap *Find devices*.)
 2. Click **Connect** — you are taken to Chats, a conversation opens, and the
    handshake timeline replays while connecting:
    `TCP connect (kernel SYN/SYN-ACK/ACK) → HELLO → HELLO_ACK → ACK → ESTABLISHED`,
@@ -122,13 +142,20 @@ same idea as TCP sequence numbers:
 
 ```
 initiator ──TCP connect (kernel 3-way)──▶ responder
-initiator ──HELLO  {magic:"P2PBRIDGE", ver:1, id, name, platform, nonce}──▶
-initiator ◀──HELLO_ACK {ok, id, name, platform, echo_nonce, nonce}── responder
+initiator ──HELLO  {magic:"P2PBRIDGE", ver:1, id, name, platform, nonce,
+                    password?}──────────────────────────▶
+initiator ◀──HELLO_ACK {ok, id, name, platform, echo_nonce, nonce,
+                        reason? if rejected}── responder
 initiator ──ACK {echo_nonce: responder.nonce}──▶
                          ESTABLISHED
    then: msg / ping / pong / file-start / file-chunk / file-progress /
          file-end / file-done / bye / err          (see src/protocol.rs)
 ```
+
+`password` is only used when the responder runs in **Protected** mode.
+`reason` explains a rejection: `auth` (wrong/missing password), `declined`
+(Private mode, operator said no) or `timeout` (nobody answered the approval
+dialog within 30 s).
 
 Frames and the WebSocket control-channel schema are documented inline in
 [`src/protocol.rs`](src/protocol.rs) — the single source of truth for both
@@ -240,14 +267,15 @@ p2p-bridge/
 ├── build.rs                # embeds static/logo.ico into the Windows exes
 ├── Cargo.toml
 ├── static/                  # embedded multi-page dashboard (LocalSend-style)
-│   ├── index.html           # app shell: sidebar + Devices/Chats/Activity/Settings
-│   ├── logo.svg             # app logo (favicon + header), accent-colored
+│   ├── index.html           # app shell: sidebar + Home/Devices/Chats/Activity/Settings
+│   ├── logo.svg             # app logo (favicon + header + Home hero), accent-colored
 │   ├── logo.ico             # Windows exe/taskbar icon
 │   ├── style.css            # design system, dark + light themes
 │   └── app.js               # vanilla-JS page router + WebSocket client
 └── src/
     ├── main.rs              # p2p-bridge-server: wiring & startup
     ├── lib.rs
+    ├── access.rs            # inbound policy: Public / Private / Protected + password
     ├── browser.rs           # auto-open the dashboard as an app window
     ├── config.rs            # service constants, CLI, platform/IP detection
     ├── mdns.rs              # mDNS announce / reannounce / goodbye (mdns-sd)

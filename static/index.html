@@ -24,12 +24,21 @@ try {
   <!-- ================= sidebar ================= -->
   <aside class="sidebar">
     <div class="side-brand">
-      <img class="side-logo" src="/logo.svg" alt="Single">
+      <button class="side-toggle" id="sideToggle" title="Collapse menu" aria-label="Collapse the sidebar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg>
+      </button>
+      <button class="side-logo-btn" id="sideLogoBtn" title="Expand menu" aria-label="Expand the sidebar">
+        <img class="side-logo" src="/logo.svg" alt="Single">
+      </button>
       <span class="side-name">Single</span>
     </div>
 
     <nav class="side-nav" id="sideNav">
-      <button class="nav-item active" data-page="devices" title="Devices">
+      <button class="nav-item active" data-page="home" title="Home">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10.8 12 4l8 6.8"/><path d="M6.2 9.5V20h11.6V9.5"/><path d="M10 20v-5.6h4V20"/></svg>
+        <span class="nav-label">Home</span>
+      </button>
+      <button class="nav-item" data-page="devices" title="Devices">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="12" rx="2"/><path d="M8 20.5h8"/><path d="M12 16.5v4"/></svg>
         <span class="nav-label">Devices</span>
       </button>
@@ -57,8 +66,43 @@ try {
   <!-- ================= content ================= -->
   <main class="content">
 
+    <section class="page active" id="page-home">
+      <div class="home">
+
+        <div class="home-hero">
+          <img class="home-logo" src="/logo.svg" alt="Single logo">
+          <button class="home-name" id="homeNameBtn" title="Rename this device in Settings">
+            <span id="homeName">…</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3.7a2.6 2.6 0 0 1 3.7 3.7L8 20l-4.6 1 1-4.6L17 3.7z"/></svg>
+          </button>
+          <p class="home-sub dim" id="homeSub">starting…</p>
+        </div>
+
+        <button class="btn home-find" id="findBtn" title="Jump to the Devices page">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="m20.3 20.3-4.6-4.6"/></svg>
+          Find devices
+        </button>
+
+        <section class="card protocol-card">
+          <h2>Protocol</h2>
+          <p class="dim small proto-desc">Who may open a P2P channel with this device.</p>
+          <div class="seg protocol-seg" id="protocolSeg">
+            <button class="chip" data-m="public" title="Any device can connect">Public</button>
+            <button class="chip active" data-m="private" title="Devices must ask first">Private</button>
+            <button class="chip" data-m="protected" title="Only devices with the password">Protected</button>
+          </div>
+          <p class="proto-hint dim" id="protoHint"></p>
+          <div class="proto-pass hidden" id="protoPassRow">
+            <input type="password" id="protoPass" placeholder="connection password…" maxlength="64" autocomplete="off">
+            <button class="btn small" id="protoPassSave">Save</button>
+          </div>
+        </section>
+
+      </div>
+    </section>
+
     <!-- ========== page: devices ========== -->
-    <section class="page active" id="page-devices">
+    <section class="page" id="page-devices">
       <header class="page-head">
         <div>
           <h1>Devices</h1>
@@ -259,6 +303,40 @@ try {
 </div>
 
 <div id="reconnectBanner" class="reconnect-banner hidden">Connection lost — reconnecting…</div>
+
+<!-- Private mode: inbound handshake waiting for a decision -->
+<div class="modal-backdrop hidden" id="reqModal">
+  <div class="modal">
+    <h3>Connection request</h3>
+    <p class="dim small">A device wants to open a P2P channel with you. Protocol is set to <b>Private</b>.</p>
+    <div class="req-who">
+      <span class="dev-icon big" id="reqIcon"></span>
+      <div class="grow">
+        <div class="req-name" id="reqName">…</div>
+        <div class="dim small mono" id="reqAddr">…</div>
+      </div>
+      <span class="platform-badge" id="reqPlatform"></span>
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="reqDecline">Decline</button>
+      <button class="btn" id="reqAccept">Accept</button>
+    </div>
+  </div>
+</div>
+
+<!-- Protected mode: the remote device asked for a password -->
+<div class="modal-backdrop hidden" id="passModal">
+  <div class="modal">
+    <h3>Password required</h3>
+    <p class="dim small" id="passPeer">This device is protected — enter its connection password.</p>
+    <input type="password" id="passInput" placeholder="device password…" maxlength="64" autocomplete="off">
+    <div class="modal-actions">
+      <button class="btn ghost" id="passCancel">Cancel</button>
+      <button class="btn" id="passGo">Connect</button>
+    </div>
+  </div>
+</div>
+
 <input type="file" id="filePicker" class="hidden">
 <script src="/app.js"></script>
 </body>

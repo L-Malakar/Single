@@ -17,6 +17,7 @@
 //! 3-second latency ping loop, and a reader task that fans chat / file /
 //! state events onto the WebSocket broadcast bus.
 
+use crate::access::{AccessControl, AccessMode, Approval, ConnectRequestInfo};
 use crate::config::{MAGIC, PROTO_VER};
 use crate::files::{self, InboundTransfer, MAX_FILE_BYTES};
 use crate::protocol::*;
@@ -33,7 +34,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Generous on purpose: in Private mode the responder may legally sit on the
+/// HELLO_ACK for up to `APPROVAL_TIMEOUT` (30 s) while its operator decides,
+/// so the initiator must out-wait that window instead of giving up after 5 s.
+/// Genuine dead peers still fail fast at the TCP-connect stage.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(40);
 const PING_INTERVAL: Duration = Duration::from_secs(3);
 const CHAT_HISTORY_CAP: usize = 200;
 const TRANSFER_LIST_CAP: usize = 12;
@@ -53,6 +58,8 @@ pub struct SessionState {
     pub started_ts: i64,
     pub chat: Vec<ChatLine>,
     pub transfers: Vec<TransferDto>,
+    /// Password to offer in HELLO when the peer runs in Protected mode.
+    pub password: String,
     pub to_peer: Option<mpsc::Sender<Wire>>,
     inbound: Option<InboundTransfer>,
 }
@@ -73,6 +80,7 @@ impl SessionState {
             started_ts: now_ms(),
             chat: Vec::new(),
             transfers: Vec::new(),
+            password: String::new(),
             to_peer: None,
             inbound: None,
         }
@@ -83,6 +91,7 @@ pub struct P2pManager {
     bus: broadcast::Sender<ServerMsg>,
     self_identity: Arc<RwLock<Identity>>,
     received_dir: PathBuf,
+    access: Arc<AccessControl>,
     sessions: Arc<Mutex<HashMap<String, SessionState>>>,
 }
 
@@ -91,11 +100,13 @@ impl P2pManager {
         bus: broadcast::Sender<ServerMsg>,
         self_identity: Arc<RwLock<Identity>>,
         received_dir: PathBuf,
+        access: Arc<AccessControl>,
     ) -> Arc<Self> {
         Arc::new(Self {
             bus,
             self_identity,
             received_dir,
+            access,
             sessions: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -266,9 +277,9 @@ impl P2pManager {
     // Outgoing: dashboard-initiated connection
     // ------------------------------------------------------------------
 
-    pub fn connect_to(self: &Arc<Self>, device: &Device) {
+    pub fn connect_to(self: &Arc<Self>, device: &Device, password: &str) {
         self.drop_session(&device.id);
-        let state = SessionState::new(
+        let mut state = SessionState::new(
             (
                 device.id.clone(),
                 device.name.clone(),
@@ -277,6 +288,7 @@ impl P2pManager {
             ),
             "out",
         );
+        state.password = password.to_string();
         self.sessions_lock().insert(device.id.clone(), state);
         self.broadcast_session(&device.id, true);
         log_bus(
@@ -341,6 +353,11 @@ impl P2pManager {
         // Step 2: application-level SYN.
         let my_nonce = nonce();
         let ident = self.self_identity.read().unwrap().clone();
+        let password = self
+            .sessions_lock()
+            .get(&peer_id)
+            .map(|s| s.password.clone())
+            .unwrap_or_default();
         let hello = Wire::Hello {
             magic: MAGIC.to_string(),
             ver: PROTO_VER,
@@ -348,6 +365,7 @@ impl P2pManager {
             name: ident.name.clone(),
             platform: ident.platform.clone(),
             nonce: my_nonce.clone(),
+            password,
         };
         if write_wire(&mut wr, &hello).await.is_err() {
             self.fail_session(&peer_id, "failed to send HELLO");
@@ -378,12 +396,26 @@ impl P2pManager {
             platform: peer_platform,
             echo_nonce,
             nonce: peer_nonce,
+            reason,
         } = ack
         else {
             unreachable!()
         };
-        if !ok || echo_nonce != my_nonce {
-            self.fail_session(&peer_id, "HELLO_ACK rejected or nonce mismatch");
+        if !ok {
+            self.fail_session(
+                &peer_id,
+                &match reason.as_str() {
+                    "auth" => "auth-required: this device is protected — a password is needed".to_string(),
+                    "declined" => "the device declined the connection".to_string(),
+                    "timeout" => "approval timed out on the device".to_string(),
+                    other if other.is_empty() => "HELLO_ACK rejected".to_string(),
+                    other => format!("HELLO_ACK rejected ({other})"),
+                },
+            );
+            return;
+        }
+        if echo_nonce != my_nonce {
+            self.fail_session(&peer_id, "HELLO_ACK nonce mismatch");
             return;
         }
         let started_ts = self
@@ -461,6 +493,7 @@ impl P2pManager {
             name: peer_name,
             platform: peer_platform,
             nonce: peer_nonce,
+            password: hello_password,
         } = hello
         else {
             unreachable!()
@@ -477,6 +510,7 @@ impl P2pManager {
                     platform: String::new(),
                     echo_nonce: String::new(),
                     nonce: String::new(),
+                    reason: "invalid".into(),
                 },
             )
             .await;
@@ -487,6 +521,63 @@ impl P2pManager {
             );
             return;
         }
+
+        // ---- access gate (Home › Protocol) -------------------------------
+        let mode = self.access.mode();
+        let approved_note = match mode {
+            AccessMode::Public => "public mode".to_string(),
+            AccessMode::Protected => {
+                if !self.access.password_matches(&hello_password) {
+                    let _ = write_wire(
+                        &mut wr,
+                        &Wire::HelloAck {
+                            ok: false,
+                            id: my_id.clone(),
+                            name: String::new(),
+                            platform: String::new(),
+                            echo_nonce: String::new(),
+                            nonce: String::new(),
+                            reason: "auth".into(),
+                        },
+                    )
+                    .await;
+                    log_bus(
+                        &self.bus,
+                        "warn",
+                        format!("rejected handshake from {addr}: wrong or missing password (protected mode)"),
+                    );
+                    return;
+                }
+                "password accepted".to_string()
+            }
+            AccessMode::Private => {
+                let approval = self
+                    .access
+                    .request_approval(ConnectRequestInfo {
+                        name: peer_name.clone(),
+                        platform: peer_platform.clone(),
+                        addr: addr.to_string(),
+                    })
+                    .await;
+                if approval != Approval::Accepted {
+                    let _ = write_wire(
+                        &mut wr,
+                        &Wire::HelloAck {
+                            ok: false,
+                            id: my_id.clone(),
+                            name: String::new(),
+                            platform: String::new(),
+                            echo_nonce: String::new(),
+                            nonce: String::new(),
+                            reason: approval.reason().into(),
+                        },
+                    )
+                    .await;
+                    return;
+                }
+                "approved by operator".to_string()
+            }
+        };
 
         // SYN-ACK.
         let my_nonce = nonce();
@@ -500,6 +591,7 @@ impl P2pManager {
                 platform: ident.platform.clone(),
                 echo_nonce: peer_nonce,
                 nonce: my_nonce.clone(),
+                reason: String::new(),
             },
         )
         .await
@@ -537,7 +629,7 @@ impl P2pManager {
                 s.steps.push(HandshakeStep {
                     step: "established".into(),
                     label: "ESTABLISHED".into(),
-                    detail: format!("inbound HELLO/HELLO_ACK/ACK with “{peer_name}”"),
+                    detail: format!("inbound HELLO/HELLO_ACK/ACK with “{peer_name}” · {approved_note}"),
                     ts: now_ms(),
                     ms: None,
                 });

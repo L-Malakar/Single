@@ -113,6 +113,18 @@ pub enum ServerMsg {
     File { peer_id: String, event: FileEvent },
     #[serde(rename = "log")]
     Log { level: String, msg: String, ts: i64 },
+    /// Current inbound policy (Home › Protocol), pushed on connect + on change.
+    #[serde(rename = "access-state")]
+    AccessState { mode: String, has_password: bool },
+    /// Private mode: a peer wants in — the dashboard must accept / decline.
+    #[serde(rename = "connect-request")]
+    ConnectRequest {
+        id: String,
+        name: String,
+        platform: String,
+        addr: String,
+        ts: i64,
+    },
     #[serde(rename = "pong")]
     Pong,
 }
@@ -144,7 +156,23 @@ pub enum ClientMsg {
     #[serde(rename = "rename")]
     Rename { name: String },
     #[serde(rename = "connect")]
-    Connect { device_id: String },
+    Connect {
+        device_id: String,
+        /// Only used when the target device runs in Protected mode.
+        #[serde(default)]
+        password: String,
+    },
+    /// Home › Protocol — set the inbound connection policy.
+    #[serde(rename = "set-access")]
+    SetAccess {
+        mode: String,
+        /// Empty = keep whatever password the server already holds.
+        #[serde(default)]
+        password: String,
+    },
+    /// Answer to a Private-mode `connect-request`.
+    #[serde(rename = "connect-reply")]
+    ConnectReply { id: String, accept: bool },
     #[serde(rename = "disconnect")]
     Disconnect { session_id: String },
     #[serde(rename = "chat")]
@@ -186,6 +214,9 @@ pub enum Wire {
         name: String,
         platform: String,
         nonce: String,
+        /// Only meaningful when the responder runs in Protected mode.
+        #[serde(default)]
+        password: String,
     },
     /// Responder → initiator. Application-level SYN-ACK.
     #[serde(rename = "hello-ack")]
@@ -196,6 +227,10 @@ pub enum Wire {
         platform: String,
         echo_nonce: String,
         nonce: String,
+        /// When `ok` is false: `auth` (password needed/wrong), `declined`
+        /// (Private mode, operator said no) or `timeout` (nobody answered).
+        #[serde(default)]
+        reason: String,
     },
     /// Initiator → responder. Application-level ACK completing the handshake.
     #[serde(rename = "ack")]

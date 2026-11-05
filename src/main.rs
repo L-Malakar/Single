@@ -6,6 +6,7 @@
 //! 3. bind the P2P TCP listener (handshake endpoint for peers)
 //! 4. serve the embedded dashboard + WebSocket control channel
 
+use p2p_bridge::access::AccessControl;
 use p2p_bridge::browser;
 use p2p_bridge::config::{self, Config, APP_NAME, APP_VERSION, SERVICE_TYPE};
 use p2p_bridge::mdns::Mdns;
@@ -64,6 +65,7 @@ async fn main() -> Result<(), DynError> {
          identity  : {name} [{platform}] @ {ip}\n\
          dashboard : http://{ip}:{http_port}\n\
          p2p tcp   : {ip}:{p2p_port}\n\
+         access    : private (Public / Private / Protected - Home › Protocol)\n\
          mDNS      : {SERVICE_TYPE} ({announce})\n\n\
          The app window opens by itself - keep this console open.\n\
          Press Ctrl-C to shut down (sends mDNS goodbye).\n",
@@ -83,8 +85,9 @@ async fn main() -> Result<(), DynError> {
         });
     }
 
-    // P2P TCP listener.
-    let p2p = P2pManager::new(bus.clone(), self_identity.clone(), cfg.received_dir.clone());
+    // P2P TCP listener (inbound policy lives in AccessControl).
+    let access = AccessControl::new(bus.clone());
+    let p2p = P2pManager::new(bus.clone(), self_identity.clone(), cfg.received_dir.clone(), access.clone());
     if let Err(e) = p2p.spawn_listener(cfg.p2p_port) {
         log_bus(
             &bus,
@@ -108,6 +111,7 @@ async fn main() -> Result<(), DynError> {
         mdns,
         self_identity,
         p2p,
+        access,
         started: std::time::Instant::now(),
     });
 
