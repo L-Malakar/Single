@@ -9,6 +9,7 @@
 //! - [`server`]: Axum HTTP + WebSocket server that serves an embedded
 //!   single-page dashboard and pushes live updates to every browser.
 
+pub mod browser;
 pub mod config;
 pub mod files;
 pub mod mdns;

@@ -6,6 +6,11 @@ use std::path::PathBuf;
 /// mDNS service type we broadcast and browse on the local Wi-Fi.
 pub const SERVICE_TYPE: &str = "_p2pbridge._tcp.local.";
 
+/// Product name shown in the console banner, help text and dashboard.
+pub const APP_NAME: &str = "Single";
+/// Release version — kept in sync with `version` in `Cargo.toml` automatically.
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Magic string + protocol version exchanged during the P2P TCP handshake.
 pub const MAGIC: &str = "P2PBRIDGE";
 pub const PROTO_VER: u32 = 1;
@@ -33,6 +38,9 @@ pub struct Config {
     pub mdns_loopback: bool,
     /// Serve the UI from disk instead of the embedded copy (live editing).
     pub static_dir: Option<PathBuf>,
+    /// Open the dashboard in an app-style browser window once it is up.
+    /// Disabled with `--no-open`.
+    pub open_dashboard: bool,
 }
 
 impl Config {
@@ -45,6 +53,7 @@ impl Config {
             announce: true,
             mdns_loopback: false,
             static_dir: None,
+            open_dashboard: true,
         };
         let mut i = 1;
         while i < args.len() {
@@ -60,6 +69,7 @@ impl Config {
                 }
                 "--no-announce" => cfg.announce = false,
                 "--mdns-loopback" => cfg.mdns_loopback = true,
+                "--no-open" => cfg.open_dashboard = false,
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -93,14 +103,15 @@ impl Config {
 
 fn print_help() {
     println!(
-        "p2p-bridge-server — mDNS LAN control server\n\n\
-         USAGE: p2p-bridge-server [FLAGS]\n\n\
+        "{APP_NAME} v{APP_VERSION} - mDNS LAN control server\n\n\
+         USAGE: {APP_NAME} [FLAGS]\n\n\
          FLAGS:\n\
            --name <name>        display name broadcast over mDNS (default: hostname)\n\
            --http-port <port>   dashboard + WebSocket port   (default: 3000)\n\
            --p2p-port <port>    peer-to-peer TCP port        (default: 5050)\n\
            --received-dir <dir> where inbound files are saved (default: ./received)\n\
            --static-dir <dir>   serve UI from disk instead of embedded assets\n\
+           --no-open            do not auto-open the dashboard app window\n\
            --no-announce        do not broadcast our own mDNS service\n\
            --mdns-loopback      join multicast on loopback too (containers/offline dev)\n\
          "
