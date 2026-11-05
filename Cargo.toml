@@ -24,3 +24,8 @@ path = "src/main.rs"
 [[bin]]
 name = "device-simulator"
 path = "src/bin/device_simulator.rs"
+
+# Smaller, stripped release binaries for the packaged "Single" app.
+[profile.release]
+lto = "thin"
+strip = true
