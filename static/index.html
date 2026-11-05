@@ -7,9 +7,9 @@
 <meta name="theme-color" content="#0b0d10">
 <title>Single</title>
 <script>
-/* Apply the saved theme before first paint (no flash). */
+/* Apply the saved theme before first paint (no flash). Default: follow the OS. */
 try {
-  var _t = localStorage.getItem("single-theme") || "dark";
+  var _t = localStorage.getItem("single-theme") || "system";
   var _dark = _t === "dark" || (_t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
   document.documentElement.dataset.theme = _dark ? "dark" : "light";
 } catch (e) {}
@@ -27,10 +27,10 @@ try {
       <button class="side-toggle" id="sideToggle" title="Collapse menu" aria-label="Collapse the sidebar">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg>
       </button>
-      <button class="side-logo-btn" id="sideLogoBtn" title="Expand menu" aria-label="Expand the sidebar">
+      <button class="side-logo-btn" id="sideLogoBtn" title="Collapse menu" aria-label="Collapse or expand the sidebar">
         <img class="side-logo" src="/logo.svg" alt="Single">
       </button>
-      <span class="side-name">Single</span>
+      <button class="side-name" id="sideNameBtn" title="Collapse menu" aria-label="Collapse the sidebar">Single</button>
     </div>
 
     <nav class="side-nav" id="sideNav">
@@ -251,9 +251,9 @@ try {
               <div class="dim small">System follows your OS setting</div>
             </div>
             <div class="seg" id="themeSeg">
-              <button class="chip active" data-t="dark">Dark</button>
+              <button class="chip" data-t="dark">Dark</button>
               <button class="chip" data-t="light">Light</button>
-              <button class="chip" data-t="system">System</button>
+              <button class="chip active" data-t="system">System</button>
             </div>
           </div>
         </section>

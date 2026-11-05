@@ -41,6 +41,8 @@ Requires Rust 1.75+ (stable).
 ```bash
 # 0 — or skip all of this: package the double-clickable Windows app
 #     build.bat      ->  Single\Single-v0.1.1.exe  +  Single-v0.1.1.zip
+#                        + single-v0.1.1.apk for Android (if the Android
+#                        SDK/NDK are installed — see android/README.md)
 
 # 1 — build both binaries
 cargo build
@@ -68,9 +70,11 @@ see — each instance broadcasts and browses the same service type.
 ### The dashboard
 
 The UI is a multi-page app in the spirit of LocalSend: a left navigation rail
-(collapse it to icons with the chevron button; while collapsed, the app logo
-itself expands it back — YouTube-style) with five
-focused pages instead of one dense control panel.
+with five
+focused pages instead of one dense control panel. The rail collapses to icons
+YouTube-style — with the chevron button, or the brand row itself: when
+expanded, the logo / “Single” text collapses it; when collapsed, the logo
+expands it again (the choice persists across reloads).
 
 | page | what lives there |
 | --- | --- |
@@ -189,6 +193,25 @@ the console to UTF-8, and once the HTTP listener is up it opens the dashboard
 in an app-style window (Edge → Chrome → default browser; disable with
 `--no-open`).
 
+### Packaging the Android app (single-v0.1.1.apk)
+
+The same `build.bat` also builds an installable Android APK whenever an
+Android Studio installation is present (SDK platform 34 + an NDK; gradle on
+PATH — otherwise the step is skipped with a hint and the Windows build
+simply finishes without it):
+
+1. the Rust server is cross-compiled for `aarch64-linux-android` (phones) and
+   `x86_64-linux-android` (emulators) with the NDK linker,
+2. the binaries travel inside the APK as `jniLibs/<abi>/libsingle.so`,
+3. gradle packages `android/` (a ~200-line WebView + foreground-service
+   wrapper — see `android/README.md`) into `single-v0.1.1.apk` at the project
+   root.
+
+Copy the APK to the phone (or `adb install single-v0.1.1.apk`), install, and
+the phone becomes a first-class peer: it runs the same server, shows the same
+dashboard, discovers and chats with the PCs on the same Wi-Fi. Files received
+by the phone land in `Android/data/app.single.bridge/files/received/`.
+
 ## CLI reference
 
 **`p2p-bridge-server`**
@@ -263,9 +286,14 @@ Linux: `sudo ufw allow 5353/udp && sudo ufw allow 3000/tcp && sudo ufw allow 505
 
 ```
 p2p-bridge/
-├── build.bat               # release build + package the Single app folder
+├── build.bat               # release build + package the Single app folder + APK
 ├── build.rs                # embeds static/logo.ico into the Windows exes
 ├── Cargo.toml
+├── LICENSE                 # MIT
+├── android/                # Android wrapper: WebView + foreground service
+│   ├── app/build.gradle    #   gradle module (zero external dependencies)
+│   ├── app/src/main/...    #   manifest, MainActivity, ServerService, icons
+│   └── README.md           #   what the wrapper does, how installs work
 ├── static/                  # embedded multi-page dashboard (LocalSend-style)
 │   ├── index.html           # app shell: sidebar + Home/Devices/Chats/Activity/Settings
 │   ├── logo.svg             # app logo (favicon + header + Home hero), accent-colored
@@ -286,3 +314,9 @@ p2p-bridge/
     ├── server.rs            # Axum router, WS control channel, static assets
     └── bin/device_simulator.rs  # 5 fake peers incl. flaky Wi-Fi one
 ```
+
+## License
+
+Single is released under the [MIT license](LICENSE) — use it, change it,
+ship it. The `LICENSE` file in the project root is the single source of
+truth; the packaged app folders and APK mention it in their READMEs.

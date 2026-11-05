@@ -12,10 +12,12 @@
 //! Everything here is best-effort: a failure to open a window is logged, it
 //! never breaks the server.
 
+#[cfg(not(target_os = "android"))]
 use std::process::Command;
 
 /// Wait (in the background) until the dashboard port accepts connections,
 /// then open it in an app-style window. Never blocks or panics.
+#[cfg(not(target_os = "android"))]
 pub fn open_when_ready(port: u16) {
     let _ = std::thread::Builder::new()
         .name("open-dashboard".into())
@@ -85,7 +87,7 @@ fn open_app_window(url: &str) -> bool {
 // macOS / Linux / BSDs
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 fn open_app_window(url: &str) -> bool {
     let prog = if cfg!(target_os = "macos") {
         "open"
@@ -99,3 +101,12 @@ fn open_app_window(url: &str) -> bool {
 fn open_app_window(_url: &str) -> bool {
     false
 }
+
+// ---------------------------------------------------------------------------
+// Android
+// ---------------------------------------------------------------------------
+
+/// On Android the dashboard is displayed by the wrapper app's WebView
+/// (see `android/`), so there is nothing to auto-open from the server.
+#[cfg(target_os = "android")]
+pub fn open_when_ready(_port: u16) {}

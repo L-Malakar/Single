@@ -104,10 +104,25 @@ button { font-family: var(--sans); }
   border-radius: 10px;
   line-height: 0;
   flex-shrink: 0;
-  cursor: default;
+  cursor: pointer;
   transition: background 0.15s var(--ease);
 }
-.side-name { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; }
+.side-logo-btn:hover { background: var(--surface-2); }
+.side-name {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+.side-name:hover { background: var(--surface-2); }
 
 .side-toggle {
   display: grid;

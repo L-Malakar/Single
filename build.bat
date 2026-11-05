@@ -16,9 +16,13 @@ rem         README.txt               end-user notes
 rem         received\                incoming files land here
 rem         tools\Device-Simulator.exe   optional 5-fake-device demo
 rem    4. zips the folder to Single-v0.1.1.zip for sharing
+rem    5. builds the Android app too when the Android SDK/NDK are present:
+rem         single-v0.1.1.apk        install on a phone and test for real
 rem
 rem  REQUIREMENTS
 rem    Rust installed on Windows  -  https://rustup.rs  (rustup default stable)
+rem    Android APK (optional): Android Studio install (SDK platform 34 + NDK)
+rem                            and gradle on PATH - see android\README.md
 rem
 rem  The version number is read from Cargo.toml automatically: bump the
 rem  version there, re-run this script, done.
@@ -47,6 +51,7 @@ set "SERVER_BIN=p2p-bridge-server"
 set "DIST=%APP_NAME%"
 set "EXE_NAME=%APP_NAME%-v%APP_VERSION%.exe"
 set "ZIP_NAME=%APP_NAME%-v%APP_VERSION%.zip"
+set "APK_NAME=single-v%APP_VERSION%.apk"
 
 echo.
 echo ======================================================================
@@ -62,20 +67,20 @@ if errorlevel 1 (
     goto :fail
 )
 
-rem ---- 1/5 compile -----------------------------------------------------------
-echo [1/5] Compiling release binaries - first build can take a few minutes...
+rem ---- 1/6 compile -----------------------------------------------------------
+echo [1/6] Compiling release binaries - first build can take a few minutes...
 cargo build --release --bin %SERVER_BIN% --bin device-simulator
 if errorlevel 1 goto :fail
 
-rem ---- 2/5 fresh app folder ---------------------------------------------------
-echo [2/5] Creating the %DIST% folder ...
+rem ---- 2/6 fresh app folder ---------------------------------------------------
+echo [2/6] Creating the %DIST% folder ...
 if exist "%DIST%\" rmdir /s /q "%DIST%"
 if exist "%ZIP_NAME%" del /f /q "%ZIP_NAME%"
 mkdir "%DIST%" "%DIST%\tools" "%DIST%\received"
 if errorlevel 1 goto :fail
 
-rem ---- 3/5 the app ------------------------------------------------------------
-echo [3/5] Copying %EXE_NAME% ...
+rem ---- 3/6 the app ------------------------------------------------------------
+echo [3/6] Copying %EXE_NAME% ...
 if not exist "target\release\%SERVER_BIN%.exe" (
     echo [ERROR] target\release\%SERVER_BIN%.exe missing - did the build fail?
     goto :fail
@@ -85,8 +90,8 @@ copy /y "target\release\device-simulator.exe" "%DIST%\tools\Device-Simulator.exe
 if not exist "%DIST%\%EXE_NAME%" goto :fail
 if not exist "%DIST%\tools\Device-Simulator.exe" goto :fail
 
-rem ---- 4/5 helper files -------------------------------------------------------
-echo [4/5] Writing launcher, firewall helper and README ...
+rem ---- 4/6 helper files -------------------------------------------------------
+echo [4/6] Writing launcher, firewall helper and README ...
 
 rem  -- Launch Single.bat -------------------------------------------------------
 >  "%DIST%\Launch %APP_NAME%.bat" echo @echo off
@@ -143,8 +148,9 @@ rem  -- README.txt -------------------------------------------------------------
 >> "%DIST%\README.txt" echo   and run the exe there. Every running %APP_NAME% appears
 >> "%DIST%\README.txt" echo   automatically in every dashboard - no pairing, no config.
 >> "%DIST%\README.txt" echo.
->> "%DIST%\README.txt" echo   Phones: open http://YOUR-PC-IP:3000 in the mobile browser.
->> "%DIST%\README.txt" echo   YOUR-PC-IP is shown in the console window, e.g. 192.168.1.42
+>> "%DIST%\README.txt" echo   Phones: install single-v%APP_VERSION%.apk (built next to this
+>> "%DIST%\README.txt" echo   folder when the Android SDK is installed), or open
+>> "%DIST%\README.txt" echo   http://YOUR-PC-IP:3000 in the mobile browser.
 >> "%DIST%\README.txt" echo.
 >> "%DIST%\README.txt" echo IF DEVICES DO NOT DISCOVER EACH OTHER
 >> "%DIST%\README.txt" echo   - Run enable-firewall.bat once, as administrator.
@@ -162,13 +168,25 @@ rem  -- README.txt -------------------------------------------------------------
 >> "%DIST%\README.txt" echo   --mdns-loopback      two instances on the same PC
 >> "%DIST%\README.txt" echo   --help               full flag list
 >> "%DIST%\README.txt" echo.
->> "%DIST%\README.txt" echo %APP_NAME% v%APP_VERSION% - MIT license. Built from the p2p-bridge Rust project.
+>> "%DIST%\README.txt" echo %APP_NAME% v%APP_VERSION% - MIT license. See LICENSE in the source project.
 
-rem ---- 5/5 zip for sharing -----------------------------------------------------
-echo [5/5] Zipping %ZIP_NAME% ...
+rem ---- 5/6 zip for sharing -----------------------------------------------------
+echo [5/6] Zipping %ZIP_NAME% ...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path '%DIST%' -DestinationPath '%ZIP_NAME%' -Force" >nul 2>nul
 if errorlevel 1 (
     echo        NOTE: zip step skipped - the %DIST% folder itself is complete.
+)
+
+rem ---- 6/6 Android APK (optional but automatic) ---------------------------------
+echo [6/6] Android APK (%APK_NAME%) ...
+set "APK_BUILT="
+call :build_apk
+if defined APK_BUILT (
+    echo        done.
+) else (
+    echo        SKIPPED - needs an Android Studio install ^(SDK + NDK^) and
+    echo        gradle on PATH. The Windows app above is NOT affected.
+    echo        Details: android\README.md
 )
 
 rem ---- summary -------------------------------------------------------------------
@@ -179,12 +197,103 @@ echo ======================================================================
 echo.
 for %%F in ("%DIST%\%EXE_NAME%") do echo   app    : %%~fF   [%%~zF bytes]
 if exist "%ZIP_NAME%" for %%F in ("%ZIP_NAME%") do echo   zip    : %%~fF   [%%~zF bytes]
+if defined APK_BUILT for %%F in ("%APK_NAME%") do echo   apk    : %%~fF   [%%~zF bytes]
 for %%F in ("%DIST%") do echo   folder : %%~fF
 echo.
 echo   RUN IT : double-click   %DIST%\%EXE_NAME%
 echo             the app window opens by itself - no localhost address needed.
+if defined APK_BUILT echo   PHONE  : copy %APK_NAME% to the phone and tap it to install.
 echo.
 goto :done
+
+rem ===========================================================================
+rem  :build_apk  -  cross-compile the server for Android and package the APK.
+rem  Returns with APK_BUILT=1 on success; every failure path just returns
+rem  (the Windows build is already complete at this point).
+rem ===========================================================================
+:build_apk
+
+rem -- 1. locate the Android SDK -----------------------------------------------
+set "SDK="
+if defined ANDROID_HOME if exist "%ANDROID_HOME%" set "SDK=%ANDROID_HOME%"
+if not defined SDK if defined ANDROID_SDK_ROOT if exist "%ANDROID_SDK_ROOT%" set "SDK=%ANDROID_SDK_ROOT%"
+if not defined SDK if exist "%LOCALAPPDATA%\Android\Sdk" set "SDK=%LOCALAPPDATA%\Android\Sdk"
+if not defined SDK (
+    echo        [apk] Android SDK not found - looked at ANDROID_HOME,
+    echo        ANDROID_SDK_ROOT and %%LOCALAPPDATA%%\Android\Sdk.
+    goto :eof
+)
+
+rem -- 2. locate the newest installed NDK --------------------------------------
+set "NDK_DIR="
+for /f "delims=" %%d in ('dir /b /ad /o-n "%SDK%\ndk" 2^>nul') do (
+    if not defined NDK_DIR if exist "%SDK%\ndk\%%d\toolchains\llvm\prebuilt\windows-x86_64\bin\aarch64-linux-android24-clang.cmd" set "NDK_DIR=%SDK%\ndk\%%d"
+)
+if not defined NDK_DIR (
+    echo        [apk] No Android NDK under %SDK%\ndk - install it via
+    echo        Android Studio ^> SDK Manager ^> SDK Tools ^> NDK ^(side by side^).
+    goto :eof
+)
+
+rem -- 3. make sure the rust android targets are installed ----------------------
+echo        [apk] checking rust targets ...
+rustup target list --installed 2>nul | findstr /c:"aarch64-linux-android" >nul
+if errorlevel 1 rustup target add aarch64-linux-android
+if errorlevel 1 goto :eof
+rustup target list --installed 2>nul | findstr /c:"x86_64-linux-android" >nul
+if errorlevel 1 rustup target add x86_64-linux-android
+if errorlevel 1 goto :eof
+
+rem -- 4. cross-compile the server for arm64 (phones) + x86_64 (emulators) ------
+set "LDR=%NDK_DIR%\toolchains\llvm\prebuilt\windows-x86_64\bin"
+set "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=%LDR%\aarch64-linux-android24-clang.cmd"
+set "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=%LDR%\x86_64-linux-android24-clang.cmd"
+echo        [apk] cargo build for aarch64-linux-android ...
+cargo build --release --target aarch64-linux-android --bin %SERVER_BIN%
+if errorlevel 1 goto :apk_failed
+echo        [apk] cargo build for x86_64-linux-android ...
+cargo build --release --target x86_64-linux-android --bin %SERVER_BIN%
+if errorlevel 1 goto :apk_failed
+
+if not exist "android\app\src\main\jniLibs\arm64-v8a" mkdir "android\app\src\main\jniLibs\arm64-v8a"
+if not exist "android\app\src\main\jniLibs\x86_64"   mkdir "android\app\src\main\jniLibs\x86_64"
+copy /y "target\aarch64-linux-android\release\%SERVER_BIN%.exe" "android\app\src\main\jniLibs\arm64-v8a\libsingle.so" >nul
+copy /y "target\x86_64-linux-android\release\%SERVER_BIN%.exe"  "android\app\src\main\jniLibs\x86_64\libsingle.so" >nul
+if not exist "android\app\src\main\jniLibs\arm64-v8a\libsingle.so" goto :apk_failed
+
+rem -- 5. run gradle to package the APK -----------------------------------------
+set "GRADLE_CMD="
+if exist "android\gradlew.bat" set "GRADLE_CMD=android\gradlew.bat"
+if not defined GRADLE_CMD (
+    where gradle >nul 2>nul
+    if not errorlevel 1 set "GRADLE_CMD=gradle"
+)
+if not defined GRADLE_CMD (
+    echo        [apk] gradle was not found. Either add it to PATH or open the
+    echo        android\ folder in Android Studio and press Run.
+    goto :eof
+)
+if defined APK_BUILT set "APK_BUILT="
+echo        [apk] gradle assembleDebug - first run downloads gradle plugins ...
+call %GRADLE_CMD% -p android -PsingleVersion=%APP_VERSION% assembleDebug --no-daemon
+if errorlevel 1 goto :apk_failed
+if not exist "android\app\build\outputs\apk\debug\app-debug.apk" goto :apk_failed
+
+copy /y "android\app\build\outputs\apk\debug\app-debug.apk" "%APK_NAME%" >nul
+if not exist "%APK_NAME%" goto :apk_failed
+set "APK_BUILT=1"
+goto :eof
+
+:apk_failed
+echo.
+echo        *** ANDROID BUILD FAILED - messages above. Windows build is fine. ***
+echo.
+goto :eof
+
+:done
+echo Press any key to close this window ...
+pause >nul
+exit /b 0
 
 :fail
 echo.
@@ -193,8 +302,3 @@ echo.
 echo Press any key to close this window ...
 pause >nul
 exit /b 1
-
-:done
-echo Press any key to close this window ...
-pause >nul
-exit /b 0

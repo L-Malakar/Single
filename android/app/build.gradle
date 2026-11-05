@@ -1,0 +1,46 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'app.single.bridge'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "app.single.bridge"
+        minSdk 24        // Android 7.0
+        targetSdk 34     // Android 14
+        versionCode 1
+        // kept in sync by build.bat from Cargo.toml
+        versionName project.findProperty('singleVersion') ?: '0.1.1'
+    }
+
+    // build.bat copies the cross-compiled Rust server into
+    // src/main/jniLibs/<abi>/libsingle.so before invoking gradle;
+    // Android extracts it (executable) to nativeLibraryDir at install time.
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+
+    signingConfigs {
+        // Debug-keystore signing is automatic for assembleDebug.
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // For a self-signed release build run:
+            //   gradle -p android assembleRelease
+            // after adding a signingConfig here (or use assembleDebug).
+        }
+    }
+
+    lint {
+        abortOnError false
+    }
+}
+
+// The wrapper app intentionally uses only framework APIs — zero external
+// dependencies keeps the first gradle run fast and offline-friendly.

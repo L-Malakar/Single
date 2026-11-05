@@ -80,20 +80,25 @@ const SIDE_KEY = "single-side";
 function applySide(mini) {
   document.body.classList.toggle("side-mini", !!mini);
   document.documentElement.classList.toggle("side-mini", !!mini);
+  /* the whole brand row is the toggle — keep the hover hints truthful */
+  const hint = mini ? "Expand menu" : "Collapse menu";
+  for (const id of ["sideLogoBtn", "sideNameBtn"]) {
+    const el = document.getElementById(id);
+    if (el) el.title = hint;
+  }
 }
 
-$("sideToggle").addEventListener("click", () => {
-  const mini = !document.body.classList.contains("side-mini");
+function setSide(mini) {
   applySide(mini);
   try { localStorage.setItem(SIDE_KEY, mini ? "mini" : "full"); } catch {}
-});
+}
 
-/* Collapsed rail: the logo itself brings the menu back — no separate extend button. */
-$("sideLogoBtn").addEventListener("click", () => {
-  if (!document.body.classList.contains("side-mini")) return; /* expanded → the logo is just a logo */
-  applySide(false);
-  try { localStorage.setItem(SIDE_KEY, "full"); } catch {}
-});
+$("sideToggle").addEventListener("click", () => setSide(!document.body.classList.contains("side-mini")));
+
+/* Brand row = second toggle: collapsed, the logo expands the rail (no separate
+   extend button); expanded, the logo or the "Single" text collapses it. */
+$("sideLogoBtn").addEventListener("click", () => setSide(!document.body.classList.contains("side-mini")));
+$("sideNameBtn").addEventListener("click", () => setSide(!document.body.classList.contains("side-mini")));
 
 /* ================================================================== access */
 
@@ -194,14 +199,14 @@ function applyTheme(mode) {
   document.querySelector('meta[name="theme-color"]').setAttribute("content", dark ? "#0b0d10" : "#eef1f6");
 }
 
-function setTheme(mode) {
-  localStorage.setItem(THEME_KEY, mode);
+function setTheme(mode, persist = true) {
+  if (persist) localStorage.setItem(THEME_KEY, mode);
   applyTheme(mode);
   document.querySelectorAll("#themeSeg .chip").forEach((c) => c.classList.toggle("active", c.dataset.t === mode));
 }
 
 mq.addEventListener("change", () => {
-  if ((localStorage.getItem(THEME_KEY) || "dark") === "system") applyTheme("system");
+  if ((localStorage.getItem(THEME_KEY) || "system") === "system") applyTheme("system");
 });
 
 $("themeSeg").addEventListener("click", (e) => {
@@ -933,8 +938,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (function boot() {
   $("verTag").textContent = "v" + APP_VERSION;
   $("setVer").textContent = "v" + APP_VERSION;
-  const saved = localStorage.getItem(THEME_KEY) || "dark";
-  setTheme(saved);
+  /* no choice saved yet → follow the OS (system) without persisting it */
+  const savedTheme = localStorage.getItem(THEME_KEY);
+  setTheme(savedTheme || "system", !!savedTheme);
   loadAccess();
   renderAccess();
   try { state.devicePasswords = JSON.parse(localStorage.getItem("single-device-pw") || "{}"); } catch {}
