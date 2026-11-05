@@ -1,7 +1,7 @@
-# Single
-An all in one hub devise connector by wi-fi or LAN
+# ⇄ Single — mDNS LAN Control Server
 
-# ⇄ p2p-bridge — mDNS LAN Control Server
+> **App name: Single** (Rust crate: `p2p-bridge`). `build.bat` packages it as a
+double-clickable Windows app — see [Packaging](#packaging-the-windows-app).
 
 A local Wi-Fi cross-platform control server written in Rust. It **broadcasts itself
 over mDNS** (Bonjour / Zeroconf), **discovers Android & Windows peers** on the
@@ -39,6 +39,9 @@ transfer files directly over the P2P channel.
 Requires Rust 1.75+ (stable).
 
 ```bash
+# 0 — or skip all of this: package the double-clickable Windows app
+#     build.bat      ->  Single\Single-v0.1.1.exe  +  Single-v0.1.1.zip
+
 # 1 — build both binaries
 cargo build
 
@@ -50,6 +53,7 @@ cargo build
 
 # 4 — open the dashboard
 #    http://localhost:3000
+#    (the exe opens this window by itself — no address to type)
 ```
 
 The simulator registers five fake devices over **real mDNS** —
@@ -117,6 +121,34 @@ Frames and the WebSocket control-channel schema are documented inline in
 [`src/protocol.rs`](src/protocol.rs) — the single source of truth for both
 ends.
 
+## Packaging the Windows app
+
+`build.bat` (run it on Windows, from the project root) compiles the release
+binaries and builds a distributable folder — no installer, no localhost
+address to type:
+
+```
+Single/
+├── Single-v0.1.1.exe      the app — double-click it: the console is the
+│                          server, and the dashboard opens automatically
+│                          as an Edge/Chrome --app window
+├── Launch Single.bat      friendly starter
+├── enable-firewall.bat    one-time firewall rules (mDNS / dashboard / P2P),
+│                          self-elevating via UAC
+├── README.txt             end-user notes
+├── received/              inbound transfers land here
+└── tools/
+    └── Device-Simulator.exe
+
+Single-v0.1.1.zip          the same folder, zipped for sharing
+```
+
+The version is read from `Cargo.toml` automatically — bump it there, re-run
+`build.bat`, done. The exe itself gains two app-mode behaviours: it switches
+the console to UTF-8, and once the HTTP listener is up it opens the dashboard
+in an app-style window (Edge → Chrome → default browser; disable with
+`--no-open`).
+
 ## CLI reference
 
 **`p2p-bridge-server`**
@@ -128,6 +160,7 @@ ends.
 | `--p2p-port <p>` | 5050 | peer-to-peer TCP listener |
 | `--received-dir <dir>` | `./received` | where inbound files are stored |
 | `--static-dir <dir>` | embedded | serve the UI from disk (live-edit without rebuilds) |
+| `--no-open` | on | don't auto-open the dashboard app window |
 | `--no-announce` | — | browse only, don't broadcast ourselves |
 | `--mdns-loopback` | off | also join multicast on `lo` (containers / offline dev) |
 
@@ -190,14 +223,16 @@ Linux: `sudo ufw allow 5353/udp && sudo ufw allow 3000/tcp && sudo ufw allow 505
 
 ```
 p2p-bridge/
+├── build.bat               # release build + package the Single app folder
 ├── Cargo.toml
 ├── static/                  # embedded single-page dashboard
 │   ├── index.html
-│   ├── style.css            # dark slate/indigo theme
+│   ├── style.css            # Apple-inspired dark theme (materials, hairlines, iMessage chat)
 │   └── app.js               # vanilla-JS WebSocket client
 └── src/
     ├── main.rs              # p2p-bridge-server: wiring & startup
     ├── lib.rs
+    ├── browser.rs           # auto-open the dashboard as an app window
     ├── config.rs            # service constants, CLI, platform/IP detection
     ├── mdns.rs              # mDNS announce / reannounce / goodbye (mdns-sd)
     ├── registry.rs          # live device table: browse loop + TTL reaper
