@@ -41,8 +41,8 @@ Requires Rust 1.75+ (stable).
 ```bash
 # 0 — or skip all of this: package the double-clickable Windows app
 #     build.bat      ->  Single\Single-v0.1.1.exe  +  Single-v0.1.1.zip
-#                        + single-v0.1.1.apk for Android (if the Android
-#                        SDK/NDK are installed — see android/README.md)
+#                        + Single\single-v0.1.1.apk for Android (the prebuilt
+#                        APK ships with the source — no SDK needed)
 
 # 1 — build both binaries
 cargo build
@@ -195,10 +195,14 @@ in an app-style window (Edge → Chrome → default browser; disable with
 
 ### Packaging the Android app (single-v0.1.1.apk)
 
-The same `build.bat` also builds an installable Android APK whenever an
-Android Studio installation is present (SDK platform 34 + an NDK; gradle on
-PATH — otherwise the step is skipped with a hint and the Windows build
-simply finishes without it):
+A ready-made, debug-signed **`single-v0.1.1.apk` ships with the source
+project** (next to `build.bat`), and `build.bat` copies it into the `Single\`
+folder on every run — no Android SDK required to install it on a phone.
+
+When the prebuilt file is missing, `build.bat` builds a fresh one from
+source, which needs an Android Studio installation (SDK platform 34 + an
+NDK; gradle on PATH — otherwise the step is skipped with a hint and the
+Windows build simply finishes without it):
 
 1. the Rust server is cross-compiled for `aarch64-linux-android` (phones) and
    `x86_64-linux-android` (emulators) with the NDK linker,

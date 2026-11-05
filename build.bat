@@ -16,13 +16,16 @@ rem         README.txt               end-user notes
 rem         received\                incoming files land here
 rem         tools\Device-Simulator.exe   optional 5-fake-device demo
 rem    4. zips the folder to Single-v0.1.1.zip for sharing
-rem    5. builds the Android app too when the Android SDK/NDK are present:
-rem         single-v0.1.1.apk        install on a phone and test for real
+rem    5. puts the Android app next to the folder:
+rem         single-v0.1.1.apk  install on a phone and test for real
+rem       The prebuilt APK that ships with the source zip is used as-is;
+rem       when it is missing, a fresh one is built from source.
 rem
 rem  REQUIREMENTS
 rem    Rust installed on Windows  -  https://rustup.rs  (rustup default stable)
-rem    Android APK (optional): Android Studio install (SDK platform 34 + NDK)
-rem                            and gradle on PATH - see android\README.md
+rem    Android APK: none - a ready-made APK ships with the source project.
+rem    To rebuild it from source: Android Studio (SDK platform 34 + NDK),
+rem    or the command-line setup in android\README.md.
 rem
 rem  The version number is read from Cargo.toml automatically: bump the
 rem  version there, re-run this script, done.
@@ -148,9 +151,10 @@ rem  -- README.txt -------------------------------------------------------------
 >> "%DIST%\README.txt" echo   and run the exe there. Every running %APP_NAME% appears
 >> "%DIST%\README.txt" echo   automatically in every dashboard - no pairing, no config.
 >> "%DIST%\README.txt" echo.
->> "%DIST%\README.txt" echo   Phones: install single-v%APP_VERSION%.apk (built next to this
->> "%DIST%\README.txt" echo   folder when the Android SDK is installed), or open
->> "%DIST%\README.txt" echo   http://YOUR-PC-IP:3000 in the mobile browser.
+>> "%DIST%\README.txt" echo   Phones: install single-v%APP_VERSION%.apk from this folder -
+>> "%DIST%\README.txt" echo   copy it to the phone and tap it (allow "install unknown
+>> "%DIST%\README.txt" echo   apps" when asked) - or open http://YOUR-PC-IP:3000 in the
+>> "%DIST%\README.txt" echo   mobile browser.
 >> "%DIST%\README.txt" echo.
 >> "%DIST%\README.txt" echo IF DEVICES DO NOT DISCOVER EACH OTHER
 >> "%DIST%\README.txt" echo   - Run enable-firewall.bat once, as administrator.
@@ -177,17 +181,31 @@ if errorlevel 1 (
     echo        NOTE: zip step skipped - the %DIST% folder itself is complete.
 )
 
-rem ---- 6/6 Android APK (optional but automatic) ---------------------------------
+rem ---- 6/6 Android APK ----------------------------------------------------------
 echo [6/6] Android APK (%APK_NAME%) ...
 set "APK_BUILT="
+
+rem  -- fast path: the source project ships a ready-made APK --------------------
+if exist "%APK_NAME%" (
+    set "APK_BUILT=1"
+    echo        using the prebuilt APK that ships with the project - done.
+    goto :apk_ready
+)
+
 call :build_apk
 if defined APK_BUILT (
     echo        done.
 ) else (
-    echo        SKIPPED - needs an Android Studio install ^(SDK + NDK^) and
-    echo        gradle on PATH. The Windows app above is NOT affected.
-    echo        Details: android\README.md
+    echo        SKIPPED - no prebuilt %APK_NAME% here and no Android SDK on
+    echo        this PC. The Windows app above is NOT affected.
+    echo        Tip: the source zip includes %APK_NAME% - keep it next to
+    echo        build.bat and this step always succeeds with no SDK at all.
+    echo        To build the APK from source: android\README.md
 )
+
+:apk_ready
+rem  -- always park the APK inside the Single folder so it is easy to find ------
+if defined APK_BUILT if exist "%APK_NAME%" copy /y "%APK_NAME%" "%DIST%\" >nul
 
 rem ---- summary -------------------------------------------------------------------
 echo.
@@ -197,12 +215,12 @@ echo ======================================================================
 echo.
 for %%F in ("%DIST%\%EXE_NAME%") do echo   app    : %%~fF   [%%~zF bytes]
 if exist "%ZIP_NAME%" for %%F in ("%ZIP_NAME%") do echo   zip    : %%~fF   [%%~zF bytes]
-if defined APK_BUILT for %%F in ("%APK_NAME%") do echo   apk    : %%~fF   [%%~zF bytes]
+if defined APK_BUILT for %%F in ("%DIST%\%APK_NAME%") do echo   apk    : %%~fF   [%%~zF bytes]
 for %%F in ("%DIST%") do echo   folder : %%~fF
 echo.
 echo   RUN IT : double-click   %DIST%\%EXE_NAME%
 echo             the app window opens by itself - no localhost address needed.
-if defined APK_BUILT echo   PHONE  : copy %APK_NAME% to the phone and tap it to install.
+if defined APK_BUILT echo   PHONE  : copy Single\%APK_NAME% to the phone and tap it to install.
 echo.
 goto :done
 
