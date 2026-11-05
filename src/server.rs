@@ -30,6 +30,7 @@ use tokio::sync::{broadcast, mpsc};
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const STYLE_CSS: &str = include_str!("../static/style.css");
 const APP_JS: &str = include_str!("../static/app.js");
+const LOGO_SVG: &str = include_str!("../static/logo.svg");
 
 pub struct AppState {
     pub cfg: Config,
@@ -77,6 +78,9 @@ fn build_router(state: Arc<AppState>) -> Router {
                 }))
                 .route("/app.js", get(|| async {
                     ([(header::CONTENT_TYPE, "application/javascript; charset=utf-8")], APP_JS)
+                }))
+                .route("/logo.svg", get(|| async {
+                    ([(header::CONTENT_TYPE, "image/svg+xml")], LOGO_SVG)
                 }));
         }
     }

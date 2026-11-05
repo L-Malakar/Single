@@ -29,3 +29,7 @@ path = "src/bin/device_simulator.rs"
 [profile.release]
 lto = "thin"
 strip = true
+
+# Embeds static/logo.ico into the Windows exes (see build.rs).
+[build-dependencies]
+winresource = "0.1"

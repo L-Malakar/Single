@@ -227,6 +227,8 @@ p2p-bridge/
 ├── Cargo.toml
 ├── static/                  # embedded single-page dashboard
 │   ├── index.html
+│   ├── logo.svg             # app logo (favicon + header), accent-colored
+│   ├── logo.ico             # Windows exe/taskbar icon (embedded via build.rs)
 │   ├── style.css            # Apple-inspired dark theme (materials, hairlines, iMessage chat)
 │   └── app.js               # vanilla-JS WebSocket client
 └── src/
