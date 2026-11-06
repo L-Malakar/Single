@@ -391,7 +391,7 @@ impl P2pManager {
         };
         let Wire::HelloAck {
             ok,
-            id: peer_fn,
+            id: _peer_fn,
             name: peer_name,
             platform: peer_platform,
             echo_nonce,
@@ -428,7 +428,11 @@ impl P2pManager {
             if let Some(s) = map.get_mut(&peer_id) {
                 s.peer_name = peer_name.clone();
                 s.peer_platform = peer_platform.clone();
-                s.peer_id = peer_fn.clone();
+                // Keep the registry fullname as the session key / dto id.
+                // Overwriting it with the peer's self-reported fullname would
+                // desync the HashMap key from SessionState.peer_id whenever
+                // the two differ (stale registry entry), leaving a session
+                // that looks established but has no writer or ping loop.
             }
         }
         self.add_step(
@@ -466,7 +470,9 @@ impl P2pManager {
             format!("handshake complete with {peer_name} in {total_ms:.1} ms"),
         );
 
-        self.run_established(wr, lines, &peer_fn, started_ts).await;
+        // Keyed by the registry fullname (same as the sessions map insert in
+        // connect_to), NOT by the peer's self-reported id.
+        self.run_established(wr, lines, &peer_id, started_ts).await;
     }
 
     // ------------------------------------------------------------------
@@ -1180,14 +1186,10 @@ fn dto(s: &SessionState, include_chat: bool) -> SessionDto {
 }
 
 fn push_transfer(s: &mut SessionState, t: TransferDto) {
-    // Drop the oldest finished transfer beyond the cap.
+    // Drop the oldest FINISHED transfer beyond the cap. Never evict an
+    // in-progress one — the receiver keeps updating it by tid.
     if s.transfers.len() >= TRANSFER_LIST_CAP {
-        if let Some(pos) = s
-            .transfers
-            .iter()
-            .position(|x| x.status != "in-progress")
-            .or(Some(0))
-        {
+        if let Some(pos) = s.transfers.iter().position(|x| x.status != "in-progress") {
             s.transfers.remove(pos);
         }
     }

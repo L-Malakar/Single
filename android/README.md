@@ -29,12 +29,16 @@ SDK, no Android Studio, no gradle needed — it is a normal debug-signed APK:
 3. Open **Single**, keep the phone on the same Wi-Fi as your PC.
 
 Install over an older build? Android refuses to "update" an APK signed with a
-different key — uninstall the old one first.
+different key — uninstall the old one first. (Each machine that builds the
+APK produces its own debug key, so this applies to every fresh checkout.)
 
 ## What works on the phone
 
 - Full dashboard UI (identical multi-page app — Home / Devices / Chats /
-  Activity / Settings).
+  Activity / Settings). On a phone screen the navigation is a **bottom tab
+  bar** with labelled tabs, like a native app — no tiny desktop sidebar
+  squeezed onto the screen. The Android back button walks back through the
+  pages instead of closing the app.
 - mDNS discovery with other Single instances on the same Wi-Fi (the service
   holds a `MulticastLock`, which Android requires for multicast).
 - P2P chat + file transfer. Files sent to the phone land in

@@ -66,9 +66,21 @@ function showPage(name) {
   document.querySelectorAll("#sideNav .nav-item").forEach((b) => b.classList.toggle("active", b.dataset.page === name));
 }
 
+/* User-driven navigation pushes a history entry, so the phone back button
+   walks back inside the dashboard (Devices → Home …) instead of killing the
+   app. popstate just shows the target page without pushing again. */
+function goto(name) {
+  if (name === state.page) return;
+  history.pushState({ page: name }, "");
+  showPage(name);
+}
+window.addEventListener("popstate", (e) => {
+  showPage((e.state && e.state.page) || "home");
+});
+
 $("sideNav").addEventListener("click", (e) => {
   const btn = e.target.closest(".nav-item");
-  if (btn) showPage(btn.dataset.page);
+  if (btn) goto(btn.dataset.page);
 });
 
 /* ============================================================ sidebar collapse
@@ -171,8 +183,8 @@ function applyAccess(msg) {
 
 /* ================================================================== home */
 
-$("homeNameBtn").addEventListener("click", () => showPage("settings"));
-$("findBtn").addEventListener("click", () => showPage("devices"));
+$("homeNameBtn").addEventListener("click", () => goto("settings"));
+$("findBtn").addEventListener("click", () => goto("devices"));
 
 function updateHome() {
   if (!state.self) return;
@@ -284,7 +296,7 @@ function handle(msg) {
         appendBubble(s, msg.line);
         s._rendered = (s.dto.chat || []).length;
       }
-      else s.unread++;
+      else if (msg.line.dir !== "sys") s.unread++;   /* notices don't count as unread */
       updateNavBadge();
       renderChatList();
       break;
@@ -443,7 +455,7 @@ $("deviceGrid").addEventListener("click", (e) => {
     btn.disabled = true;
     btn.textContent = "Connecting…";
   } else {
-    showPage("chats");
+    goto("chats");
     openChat(id);
   }
 });
@@ -469,7 +481,13 @@ function upsertSession(dto) {
   let s = state.sessions.get(dto.peer_id);
   const fresh = !s;
   if (s) {
-    s.dto = Object.assign({}, s.dto, dto);
+    const merged = Object.assign({}, s.dto, dto);
+    /* Routine session broadcasts serialize `chat: None` as JSON null.
+       Letting that through Object.assign would WIPE the accumulated
+       history (open chats reset to "start of the conversation" on every
+       rtt/state push). Keep the local history when the update has none. */
+    if (dto.chat == null && s.dto.chat != null) merged.chat = s.dto.chat;
+    s.dto = merged;
   } else {
     s = { dto, unread: 0, _rendered: 0 };
     state.sessions.set(dto.peer_id, s);
@@ -491,7 +509,7 @@ function upsertSession(dto) {
        or inbound connections never yank the user around */
     if (state.pendingConnect === dto.peer_id) {
       state.pendingConnect = null;
-      showPage("chats");
+      goto("chats");
       openChat(dto.peer_id);
     }
   } else if (state.activePeer === dto.peer_id) {
@@ -616,6 +634,8 @@ function updateChatView(s, fullRebuild = false) {
   }
 
   view.querySelector(".chat-input input").disabled = d.state !== "established";
+  view.querySelector('[data-act="send"]').disabled = d.state !== "established";
+  view.querySelector('[data-act="file"]').disabled = d.state !== "established";
 
   /* handshake disclosure: visible while connecting (interesting to watch),
      auto-collapsed once established unless the user pinned it open */
@@ -713,19 +733,18 @@ function renderTransfers(s, chatEl) {
   }
 }
 
+/* Chat + completion lines for a transfer come from the server as `chat`
+   events (single source of truth). The UI only adds the “↓ receiving …”
+   line for a brand-new inbound transfer. */
 function handleFileEvent(peerId, ev) {
   const s = state.sessions.get(peerId);
   if (!s) return;
   if (!s.dto.chat) s.dto.chat = [];
-  if (ev.status === "start") {
+  if (ev.status === "start" && ev.direction === "in") {
     s.dto.chat.push({ dir: "sys", text: `↓ ${ev.detail}`, ts: Date.now() });
-  } else if (ev.status === "done" && ev.direction === "in" && ev.detail) {
-    s.dto.chat.push({ dir: "sys", text: `✓ saved → ${ev.detail}`, ts: Date.now() });
-  } else if (ev.status === "error") {
-    s.dto.chat.push({ dir: "sys", text: `✗ ${ev.detail || "transfer failed"}`, ts: Date.now() });
   }
   if (state.activePeer === peerId) updateChatView(s);
-  renderChatList();
+  else renderChatList();
 }
 
 /* ============================================================ file pickup */
@@ -757,7 +776,10 @@ async function sendFile(s, file) {
     } catch { /* insecure origin: skip integrity check */ }
   }
 
-  send({ type: "file-begin", device_id: peerId, tid, name: file.name, size: file.size, sha256: sha });
+  if (!send({ type: "file-begin", device_id: peerId, tid, name: file.name, size: file.size, sha256: sha })) {
+    abortTransfer(s, peerId, tid, file.name, "control channel lost");
+    return;
+  }
   if (!s.dto.chat) s.dto.chat = [];
   s.dto.chat.push({ dir: "sys", text: `↑ sending “${file.name}” (${fmtBytes(file.size)})…`, ts: Date.now() });
   if (state.activePeer === peerId) {
@@ -769,10 +791,32 @@ async function sendFile(s, file) {
   const CHUNK = 48 * 1024;
   for (let seq = 0, off = 0; off < buf.length; seq++, off += CHUNK) {
     const slice = buf.subarray(off, Math.min(off + CHUNK, buf.length));
-    send({ type: "file-chunk", device_id: peerId, tid, seq, data: bufToB64(slice) });
+    if (!send({ type: "file-chunk", device_id: peerId, tid, seq, data: bufToB64(slice) })) {
+      abortTransfer(s, peerId, tid, file.name, "control channel lost mid-transfer");
+      return;
+    }
     await sleep(4);   /* gentle pacing so the WS + TCP writer can keep up */
   }
-  send({ type: "file-end", device_id: peerId, tid });
+  if (!send({ type: "file-end", device_id: peerId, tid })) {
+    abortTransfer(s, peerId, tid, file.name, "control channel lost at the end");
+    return;
+  }
+}
+
+/* The control WebSocket died mid-transfer: stop looping, tell the user once
+   and mark the progress row as failed (the server never saw the file). */
+function abortTransfer(s, peerId, tid, name, why) {
+  if (!s.dto.chat) s.dto.chat = [];
+  s.dto.chat.push({ dir: "sys", text: `⚠ “${name}” not sent — ${why}`, ts: Date.now() });
+  const t = (s.dto.transfers || []).find((x) => x.tid === tid);
+  if (t) { t.status = "error"; t.detail = why; }
+  if (state.activePeer === peerId) {
+    const chatEl = $("chatMain").querySelector(".chat-view .chat");
+    if (chatEl) appendBubble(s, s.dto.chat[s.dto.chat.length - 1], chatEl);
+    s._rendered = s.dto.chat.length;
+    updateChatView(s);
+  }
+  renderChatList();
 }
 
 function bufToB64(bytes) {
@@ -945,6 +989,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   renderAccess();
   try { state.devicePasswords = JSON.parse(localStorage.getItem("single-device-pw") || "{}"); } catch {}
   applySide(localStorage.getItem(SIDE_KEY) === "mini");
+  try { history.replaceState({ page: "home" }, ""); } catch {}
   showPage("home");
   connect();
   appendLog("info", "dashboard booted — connecting to control channel…", Date.now());

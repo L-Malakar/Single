@@ -960,3 +960,72 @@ button { font-family: var(--sans); }
   .chat-head .hs-toggle { display: none; }
   .chat-head .rtt-badge { padding: 3px 7px; font-size: 10px; }
 }
+
+/* ---------------------------------------------------------------- phones */
+/* ≤700 px: the sidebar becomes a bottom tab bar — the way native mobile apps
+   navigate. Applies to the Android APK WebView and to phones opening
+   http://<pc-ip>:3000 in a browser. Desktops and tablets keep the sidebar. */
+@media (max-width: 700px) {
+  .app { flex-direction: column; height: 100vh; height: 100dvh; }
+
+  .sidebar {
+    order: 2;                   /* park it below the content */
+    width: 100%;
+    flex-direction: row;
+    gap: 0;
+    flex-shrink: 0;
+    padding: 0 0 env(safe-area-inset-bottom, 0px);
+    border-right: none;
+    border-top: 1px solid var(--hairline);
+  }
+
+  /* brand row and status rows have no place in a bottom bar; the reconnect
+     banner already shouts "offline" and the version lives in Settings */
+  .side-brand, .side-foot, .side-toggle, .side-name { display: none; }
+
+  .side-nav {
+    flex-direction: row;
+    width: 100%;
+    gap: 2px;
+    padding: 6px 6px 5px;
+  }
+
+  .nav-item {
+    flex: 1 1 0;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+    padding: 7px 0 6px;
+    border-radius: 12px;
+    font-size: 10.5px;
+    text-align: center;
+  }
+  .nav-item svg { width: 22px; height: 22px; }
+
+  /* tab labels come back as the second line of each tab (the ≤980 px rules
+     hid them for the icon-rail layout; this block is later in source order) */
+  .nav-label { display: block; font-size: 10.5px; font-weight: 600; }
+
+  .nav-badge {
+    position: absolute;
+    top: 3px;
+    right: calc(50% - 30px);
+    margin: 0;
+    min-width: 16px; height: 16px; font-size: 10px;
+  }
+
+  .page { padding: 16px 14px 26px; }
+  .home-logo { width: 104px; height: 104px; }
+  .home-hero { padding: 10px 0 6px; }
+
+  /* 3-up segments wrap instead of overflowing on narrow screens */
+  .seg { flex-wrap: wrap; justify-content: center; }
+  .protocol-seg .chip { min-width: 0; padding: 6px 12px; }
+
+  .chat-layout:has(.chat-view) .chat-list { max-height: 88px; }
+  .chat-input { padding: 8px 10px; }
+}
+
+/* disabled icon buttons (chat composer while the session is not
+   established) look as disabled as the text input does */
+.icon-btn:disabled { opacity: 0.45; cursor: default; }

@@ -76,6 +76,12 @@ YouTube-style — with the chevron button, or the brand row itself: when
 expanded, the logo / “Single” text collapses it; when collapsed, the logo
 expands it again (the choice persists across reloads).
 
+**Phones get their own layout** (≤700 px — the APK's WebView and mobile
+browsers): the sidebar becomes a bottom tab bar with the five pages as tabs
+(icon + label), like a native app. The Android back button walks back through
+the pages you visited instead of closing the app, and the bar respects the
+gesture-navigation safe area.
+
 | page | what lives there |
 | --- | --- |
 | **Home** | LocalSend-style landing: big app logo, your device name (tap to rename in Settings), a **Find devices** button, and the **Protocol** switch |
