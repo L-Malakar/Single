@@ -6,39 +6,52 @@ as a real installable APK. The wrapper app is intentionally tiny:
 ```
 android/
 ├── settings.gradle / build.gradle / gradle.properties
+├── single.keystore                 ONE stable signing key (see below)
 ├── gradle/wrapper/gradle-wrapper.properties
 └── app/
     ├── build.gradle                 no external dependencies — pure SDK APIs
     └── src/main/
         ├── AndroidManifest.xml      permissions: internet, multicast, FGS
         ├── java/app/single/bridge/
-        │   ├── MainActivity.java    WebView pointing at http://127.0.0.1:3000
+        │   ├── MainActivity.java    WebView pointing at http://127.0.0.1:3000,
+        │   │                        splash + wait-for-server startup
         │   └── ServerService.java   foreground service: spawns the server,
         │                            holds the Wi-Fi MulticastLock for mDNS
-        └── res/                      icons, theme, strings
+        └── res/                      icons, day/night splash theme, strings
 ```
 
 ## Just want to try it on a phone? Use the prebuilt APK
 
-The source project includes **`single-v0.1.1.apk`** (next to `build.bat`),
+The source project includes **`single-v0.1.3.apk`** (next to `build.bat`),
 and `build.bat` copies it into the `Single\` folder on every run. No Android
-SDK, no Android Studio, no gradle needed — it is a normal debug-signed APK:
+SDK, no Android Studio, no gradle needed:
 
-1. Copy `single-v0.1.1.apk` to the phone (USB cable, Drive, e-mail…).
+1. Copy `single-v0.1.3.apk` to the phone (USB cable, Drive, e-mail…).
 2. Tap it in the Files app and allow "install unknown apps" when asked.
 3. Open **Single**, keep the phone on the same Wi-Fi as your PC.
 
-Install over an older build? Android refuses to "update" an APK signed with a
-different key — uninstall the old one first. (Each machine that builds the
-APK produces its own debug key, so this applies to every fresh checkout.)
+## Updates & signing (important)
+
+Every build of this project — the prebuilt APK, `build.bat`, Android Studio,
+`gradle assembleDebug/Release` — signs with the **same stable key**:
+`android/single.keystore` (store password `single-bridge`, alias `single`).
+
+- A newer APK installs directly **over** an older one — no uninstall, your
+  data (chats, name, protocol) survives in `single-state.json`.
+- `versionCode` is derived from the version string (0.1.3 → 103), so it is
+  always monotonic.
+- The key is committed with the source **on purpose**: this is a self-built
+  LAN app, not a Play Store release — one shared key is what makes updates
+  work for everyone who builds it. If you ever publish to a store, replace
+  it with your own private key (and uninstall-first, once, on every device).
+- One-time exception: an install made from a *different* key — e.g. an APK
+  built before v0.1.3 — cannot be updated in place. Uninstall the old app
+  once, install this build, and every future APK updates normally.
 
 ## What works on the phone
 
 - Full dashboard UI (identical multi-page app — Home / Devices / Chats /
-  Activity / Settings). On a phone screen the navigation is a **bottom tab
-  bar** with labelled tabs, like a native app — no tiny desktop sidebar
-  squeezed onto the screen. The Android back button walks back through the
-  pages instead of closing the app.
+  Activity / Settings).
 - mDNS discovery with other Single instances on the same Wi-Fi (the service
   holds a `MulticastLock`, which Android requires for multicast).
 - P2P chat + file transfer. Files sent to the phone land in
@@ -77,6 +90,8 @@ Anything that can produce the gradle debug build works:
 Version note: the prebuilt APK always matches the version of the source zip
 it ships with. If you bump `version` in `Cargo.toml`, delete the old
 `single-v<old>.apk` so build.bat rebuilds fresh (it never mixes versions).
+The APK files are `.gitignored` (`single-v*.apk`) — they ship in the source
+zip, but are never pushed to the git repo.
 
 ## Notes & limits
 

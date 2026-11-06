@@ -1,24 +1,33 @@
 /* Single — dashboard client.
  *
  * Multi-page SPA: Home · Devices · Chats · Activity · Settings (see index.html).
- * The WebSocket protocol is unchanged (see src/protocol.rs):
+ * Desktop keeps the collapsible sidebar; phones get an app bar on top and a
+ * tab bar at the bottom. The chat area is WhatsApp-style: day dividers,
+ * bubbles, file cards, wallpaper, sticky composer.
+ *
+ * The WebSocket protocol (see src/protocol.rs):
  *   ← hello {self_identity, service_type}
  *   ← devices {devices:[…]}          live mDNS registry
  *   ← session {session}              P2P session state (handshake steps, rtt…)
  *   ← chat {peer_id, line}           one chat line
  *   ← file {peer_id, event}          transfer progress
  *   ← log {level, msg}               server activity
+ *   ← logs {lines}                   persisted activity tail (on connect)
  *   ← access-state {mode, has_password}   inbound policy (Home › Protocol)
  *   ← connect-request {id, name, …}       Private-mode approval prompt
  *   → ping / refresh / rename / connect {device_id, password?}
  *     disconnect / chat / file-* / set-access {mode, password}
  *     connect-reply {id, accept}
+ *
+ * Persistence: the server keeps name/protocol/chats/logs in single-state.json;
+ * the browser remembers the last page, open conversation, drafts, theme and
+ * sidebar state so a reload (or app restart) returns exactly where you left.
  */
 
 "use strict";
 
 /* keep in sync with Cargo.toml → shown in the sidebar + Settings */
-const APP_VERSION = "0.1.1";
+const APP_VERSION = "0.1.3";
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) =>
@@ -46,53 +55,83 @@ const state = {
   filter: "all",
   page: "home",
   paused: false,
+  logBuffer: [],            // lines held while the log is paused
   logLvl: "all",
   logCount: 0,
   reconnectSec: 1,
   wsPingSent: 0,
   pendingConnect: null,
-  /* Home › Protocol — inbound connection policy (mirrored on the server) */
+  pendingOpenPeer: null,    // conversation to open once its session arrives
+  serverBoot: 0,            // ms epoch of server start (from /api/health)
+  /* Home › Protocol — mirrored from the server (authoritative) */
   access: { mode: "private", password: "" },
   reqQueue: [],             // pending Private-mode connect-requests
   passFor: null,            // peer awaiting a Protected-mode password
   devicePasswords: {},      // peer_id → last working password (prefill only)
 };
 
+/* ================================================================== toasts */
+
+function toast(msg, kind = "info", ms = 3400) {
+  const box = $("toasts");
+  if (!box) return;
+  const t = document.createElement("div");
+  t.className = "toast " + kind;
+  t.textContent = msg;
+  box.appendChild(t);
+  setTimeout(() => {
+    t.classList.add("out");
+    setTimeout(() => t.remove(), 350);
+  }, ms);
+}
+
+/* ================================================================== splash */
+
+const splashT0 = performance.now();
+
+function hideSplash() {
+  const el = $("splash");
+  if (!el || el.classList.contains("out")) return;
+  /* keep it up for a beat so fast reloads don't strobe */
+  const wait = Math.max(0, 650 - (performance.now() - splashT0));
+  setTimeout(() => {
+    el.classList.add("out");
+    setTimeout(() => el.remove(), 480);
+  }, wait);
+}
+
 /* ================================================================== pages */
 
+const PAGES = new Set(["home", "devices", "chats", "activity", "settings"]);
+const PAGE_KEY = "single-page";
+const CHAT_KEY = "single-chat";
+const DRAFT_KEY = "single-drafts";
+
 function showPage(name) {
+  if (!PAGES.has(name)) name = "home";
   state.page = name;
   document.querySelectorAll(".page").forEach((p) => p.classList.toggle("active", p.id === `page-${name}`));
-  document.querySelectorAll("#sideNav .nav-item").forEach((b) => b.classList.toggle("active", b.dataset.page === name));
+  document.querySelectorAll(".nav-item, .tab-item").forEach((b) =>
+    b.classList.toggle("active", b.dataset.page === name));
+  try { localStorage.setItem(PAGE_KEY, name); } catch {}
 }
 
-/* User-driven navigation pushes a history entry, so the phone back button
-   walks back inside the dashboard (Devices → Home …) instead of killing the
-   app. popstate just shows the target page without pushing again. */
-function goto(name) {
-  if (name === state.page) return;
-  history.pushState({ page: name }, "");
-  showPage(name);
-}
-window.addEventListener("popstate", (e) => {
-  showPage((e.state && e.state.page) || "home");
-});
-
-$("sideNav").addEventListener("click", (e) => {
-  const btn = e.target.closest(".nav-item");
-  if (btn) goto(btn.dataset.page);
+/* one handler for the desktop sidebar and the mobile tab bar */
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".nav-item[data-page], .tab-item[data-page]");
+  if (btn) showPage(btn.dataset.page);
 });
 
 /* ============================================================ sidebar collapse
    YouTube-style: the rail shrinks to icons only; the choice persists.
-   (≤980 px the rail is always icon-only — see style.css.) */
+   (≤980 px the rail is always icon-only; ≤760 px it is replaced by the
+   mobile app bar + tab bar — see style.css.) */
 
 const SIDE_KEY = "single-side";
 
 function applySide(mini) {
   document.body.classList.toggle("side-mini", !!mini);
   document.documentElement.classList.toggle("side-mini", !!mini);
-  /* the whole brand row is the toggle — keep the hover hints truthful */
   const hint = mini ? "Expand menu" : "Collapse menu";
   for (const id of ["sideLogoBtn", "sideNameBtn"]) {
     const el = document.getElementById(id);
@@ -106,9 +145,6 @@ function setSide(mini) {
 }
 
 $("sideToggle").addEventListener("click", () => setSide(!document.body.classList.contains("side-mini")));
-
-/* Brand row = second toggle: collapsed, the logo expands the rail (no separate
-   extend button); expanded, the logo or the "Single" text collapses it. */
 $("sideLogoBtn").addEventListener("click", () => setSide(!document.body.classList.contains("side-mini")));
 $("sideNameBtn").addEventListener("click", () => setSide(!document.body.classList.contains("side-mini")));
 
@@ -117,6 +153,7 @@ $("sideNameBtn").addEventListener("click", () => setSide(!document.body.classLis
 const ACCESS_KEY = "single-access";
 
 function loadAccess() {
+  /* render cache only — the server is authoritative and pushes its state */
   try {
     const saved = JSON.parse(localStorage.getItem(ACCESS_KEY) || "{}");
     if (AccessModes.has(saved.mode)) state.access.mode = saved.mode;
@@ -170,11 +207,12 @@ function saveProtocolPassword() {
   saveAccess();
   sendAccess();
   renderAccess();
+  toast("Protocol password saved");
 }
 $("protoPassSave").addEventListener("click", saveProtocolPassword);
 $("protoPass").addEventListener("keydown", (e) => { if (e.key === "Enter") saveProtocolPassword(); });
 
-/* Server acknowledges (also pushed on every reconnect) */
+/* Server pushes the authoritative policy (on connect and on every change). */
 function applyAccess(msg) {
   if (AccessModes.has(msg.mode)) state.access.mode = msg.mode;
   saveAccess();
@@ -183,8 +221,8 @@ function applyAccess(msg) {
 
 /* ================================================================== home */
 
-$("homeNameBtn").addEventListener("click", () => goto("settings"));
-$("findBtn").addEventListener("click", () => goto("devices"));
+$("homeNameBtn").addEventListener("click", () => showPage("settings"));
+$("findBtn").addEventListener("click", () => showPage("devices"));
 
 function updateHome() {
   if (!state.self) return;
@@ -208,11 +246,12 @@ const mq = matchMedia("(prefers-color-scheme: dark)");
 function applyTheme(mode) {
   const dark = mode === "dark" || (mode === "system" && mq.matches);
   document.documentElement.dataset.theme = dark ? "dark" : "light";
-  document.querySelector('meta[name="theme-color"]').setAttribute("content", dark ? "#0b0d10" : "#eef1f6");
+  document.querySelectorAll('meta[name="theme-color"]').forEach((m) =>
+    m.setAttribute("content", dark ? "#0b0d10" : "#eef1f6"));
 }
 
 function setTheme(mode, persist = true) {
-  if (persist) localStorage.setItem(THEME_KEY, mode);
+  if (persist) { try { localStorage.setItem(THEME_KEY, mode); } catch {} }
   applyTheme(mode);
   document.querySelectorAll("#themeSeg .chip").forEach((c) => c.classList.toggle("active", c.dataset.t === mode));
 }
@@ -237,9 +276,8 @@ function connect() {
     setWsStatus("on", "live");
     $("reconnectBanner").classList.add("hidden");
     state.reconnectSec = 1;
-    /* re-apply the persisted Protocol choice — the server keeps it in memory
-       only, so every fresh dashboard session re-teaches it */
-    sendAccess();
+    /* The Protocol choice is persisted server-side and pushed to us — no
+       need to re-teach it on reconnect anymore. */
   };
   ws.onclose = () => {
     setWsStatus("off", "offline");
@@ -257,13 +295,26 @@ function connect() {
 }
 
 function send(obj) {
-  if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify(obj));
-  return state.ws && state.ws.readyState === 1;
+  if (state.ws && state.ws.readyState === 1) {
+    state.ws.send(JSON.stringify(obj));
+    return true;
+  }
+  return false;
 }
 
 function setWsStatus(cls, text) {
-  $("wsLed").className = "led " + cls;
-  $("wsText").textContent = text;
+  const led = $("wsLed");
+  if (led) led.className = "led " + cls;
+  const t = $("wsText");
+  if (t) t.textContent = text;
+  /* mobile app bar: green dot = live */
+  const dot = $("mLiveDot");
+  const mtext = $("mLiveText");
+  if (dot && mtext) {
+    dot.className = "mtop-dot " + cls;
+    mtext.textContent =
+      cls === "on" ? "LIVE" : cls === "off" ? "OFFLINE" : "CONNECTING";
+  }
 }
 
 /* ================================================================== dispatch */
@@ -274,6 +325,8 @@ function handle(msg) {
       state.self = msg.self_identity;
       state.serviceType = msg.service_type;
       renderSelf();
+      fetchHealth();
+      hideSplash();
       break;
     case "devices":
       state.devices = new Map(msg.devices.map((d) => [d.id, d]));
@@ -291,12 +344,12 @@ function handle(msg) {
       if (!dup) s.dto.chat.push(msg.line);
       if (state.activePeer === msg.peer_id) {
         const chatEl = $("chatMain").querySelector(".chat-view .chat");
-        const hint = chatEl && chatEl.querySelector(".bubble.hint");
+        const hint = chatEl && chatEl.querySelector(".bubble.sys.hint");
         if (hint) hint.remove();
         appendBubble(s, msg.line);
         s._rendered = (s.dto.chat || []).length;
       }
-      else if (msg.line.dir !== "sys") s.unread++;   /* notices don't count as unread */
+      else s.unread++;
       updateNavBadge();
       renderChatList();
       break;
@@ -306,6 +359,11 @@ function handle(msg) {
       break;
     case "log":
       appendLog(msg.level, msg.msg, msg.ts);
+      break;
+    case "logs":
+      /* persisted tail from the server — the Activity page picks up where
+         the last session left off */
+      for (const l of msg.lines || []) appendLog(l.level, l.msg, l.ts);
       break;
     case "access-state":
       applyAccess(msg);
@@ -321,6 +379,16 @@ function handle(msg) {
 }
 
 /* ================================================================== self */
+
+async function fetchHealth() {
+  try {
+    const r = await fetch("/api/health");
+    const j = await r.json();
+    if (j && typeof j.uptime_secs === "number") {
+      state.serverBoot = Date.now() - j.uptime_secs * 1000;
+    }
+  } catch { /* keep the page-uptime fallback */ }
+}
 
 function renderSelf() {
   if (!state.self) return;
@@ -421,10 +489,8 @@ function renderDevices() {
         btn = `<button class="btn ghost" data-act="open" data-id="${esc(d.id)}">Open chat</button>`;
       else if (s && s.dto.state === "connecting")
         btn = `<button class="btn ghost" disabled>Handshaking…</button>`;
-      else if (s)
-        btn = `<button class="btn" data-act="connect" data-id="${esc(d.id)}">Reconnect</button>`;
       else
-        btn = `<button class="btn" data-act="connect" data-id="${esc(d.id)}">Connect</button>`;
+        btn = `<button class="btn" data-act="connect" data-id="${esc(d.id)}">${s ? "Reconnect" : "Connect"}</button>`;
       return `
       <div class="device-card" data-card="${esc(d.id)}">
         <div class="dev-top">
@@ -455,7 +521,7 @@ $("deviceGrid").addEventListener("click", (e) => {
     btn.disabled = true;
     btn.textContent = "Connecting…";
   } else {
-    goto("chats");
+    showPage("chats");
     openChat(id);
   }
 });
@@ -464,6 +530,7 @@ $("filters").addEventListener("click", (e) => {
   const chip = e.target.closest(".chip");
   if (!chip) return;
   state.filter = chip.dataset.f;
+  try { localStorage.setItem("single-filter", state.filter); } catch {}
   document.querySelectorAll("#filters .chip").forEach((c) => c.classList.toggle("active", c === chip));
   renderDevices();
 });
@@ -481,15 +548,9 @@ function upsertSession(dto) {
   let s = state.sessions.get(dto.peer_id);
   const fresh = !s;
   if (s) {
-    const merged = Object.assign({}, s.dto, dto);
-    /* Routine session broadcasts serialize `chat: None` as JSON null.
-       Letting that through Object.assign would WIPE the accumulated
-       history (open chats reset to "start of the conversation" on every
-       rtt/state push). Keep the local history when the update has none. */
-    if (dto.chat == null && s.dto.chat != null) merged.chat = s.dto.chat;
-    s.dto = merged;
+    s.dto = Object.assign({}, s.dto, dto);
   } else {
-    s = { dto, unread: 0, _rendered: 0 };
+    s = { dto, unread: 0, _rendered: 0, _lastDay: null, showHs: false, hsUser: false };
     state.sessions.set(dto.peer_id, s);
   }
 
@@ -503,33 +564,53 @@ function upsertSession(dto) {
     askPassword(dto.peer_id);
   }
 
-  if (fresh) {
-    /* navigate to the conversation only when it is the one this user just
-       clicked Connect for — sessions replayed on page load (initial sync)
-       or inbound connections never yank the user around */
-    if (state.pendingConnect === dto.peer_id) {
-      state.pendingConnect = null;
-      goto("chats");
-      openChat(dto.peer_id);
-    }
-  } else if (state.activePeer === dto.peer_id) {
+  if (state.pendingConnect === dto.peer_id) {
+    state.pendingConnect = null;
+    showPage("chats");
+    openChat(dto.peer_id);
+  }
+  /* restore the conversation the user had open before a reload/restart */
+  if (state.pendingOpenPeer === dto.peer_id) {
+    state.pendingOpenPeer = null;
+    showPage("chats");
+    openChat(dto.peer_id);
+  }
+  if (!fresh && state.activePeer === dto.peer_id) {
     updateChatView(s);
   }
 }
 
-function lastLinePreview(s) {
+/* ---------- chat list (WhatsApp-style rows) ---------- */
+
+function lastLineOf(s) {
   const c = s.dto.chat || [];
-  if (!c.length) return stateLabel(s.dto).toLowerCase();
-  const l = c[c.length - 1];
-  const who = l.dir === "out" ? "you: " : l.dir === "in" ? "" : "";
-  return who + l.text;
+  return c.length ? c[c.length - 1] : null;
+}
+
+function chatStamp(s) {
+  const l = lastLineOf(s);
+  const ts = l ? l.ts : s.dto.started_ts;
+  const d = new Date(ts);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleDateString([], { day: "numeric", month: "short" });
+}
+
+function lastLinePreview(s) {
+  const l = lastLineOf(s);
+  if (!l) return stateLabel(s.dto).toLowerCase();
+  const who = l.dir === "out" ? "you: " : "";
+  const text = l.text.length > 48 ? l.text.slice(0, 48) + "…" : l.text;
+  return who + text;
 }
 
 function renderChatList() {
   const listEl = $("chatList");
   const items = [...state.sessions.values()].sort((a, b) => {
-    const la = (a.dto.chat || []).length, lb = (b.dto.chat || []).length;
-    return lb - la;
+    const ta = (lastLineOf(a) || { ts: a.dto.started_ts }).ts;
+    const tb = (lastLineOf(b) || { ts: b.dto.started_ts }).ts;
+    return tb - ta; /* most recent first */
   });
   $("chatsEmpty").style.display = items.length === 0 ? "" : "none";
   listEl.querySelectorAll(".chat-item").forEach((el) => el.remove());
@@ -539,10 +620,13 @@ function renderChatList() {
     btn.className = "chat-item" + (state.activePeer === d.peer_id ? " active" : "");
     btn.dataset.peer = d.peer_id;
     btn.innerHTML = `
-      <span class="dev-icon">${ICONS[d.peer_platform] || ICONS.unknown}</span>
+      <span class="ci-avatar">${ICONS[d.peer_platform] || ICONS.unknown}</span>
       <span class="grow">
-        <span class="ci-name">${esc(d.peer_name)}</span>
-        <span class="ci-sub">${esc(lastLinePreview(s).slice(0, 42))}</span>
+        <span class="ci-top">
+          <span class="ci-name">${esc(d.peer_name)}</span>
+          <span class="ci-time">${esc(chatStamp(s))}</span>
+        </span>
+        <span class="ci-sub">${esc(lastLinePreview(s))}</span>
       </span>
       ${s.unread ? `<span class="ci-unread">${s.unread}</span>` : ""}`;
     btn.onclick = () => openChat(d.peer_id);
@@ -555,12 +639,28 @@ $("chatList").addEventListener("click", (e) => {
   if (btn) openChat(btn.dataset.peer);
 });
 
+/* ---------- drafts (kept per peer) ---------- */
+
+function loadDrafts() {
+  try { return JSON.parse(localStorage.getItem(DRAFT_KEY) || "{}"); } catch { return {}; }
+}
+function saveDraft(peerId, text) {
+  const d = loadDrafts();
+  if (text) d[peerId] = text.slice(0, 2000); else delete d[peerId];
+  try { localStorage.setItem(DRAFT_KEY, JSON.stringify(d)); } catch {}
+}
+
+/* ---------- conversation view ---------- */
+
 function openChat(peerId) {
   const s = state.sessions.get(peerId);
   if (!s) return;
   state.activePeer = peerId;
   s.unread = 0;
+  s._lastDay = null;
   updateNavBadge();
+  try { localStorage.setItem(CHAT_KEY, peerId); } catch {}
+  document.body.classList.add("chat-open");
 
   const d = s.dto;
   $("chatPlaceholder").classList.add("hidden");
@@ -572,7 +672,10 @@ function openChat(peerId) {
   view.className = "chat-view";
   view.innerHTML = `
     <header class="chat-head">
-      <span class="dev-icon">${ICONS[d.peer_platform] || ICONS.unknown}</span>
+      <button class="back-btn" data-act="back" title="All chats" aria-label="Back to all chats">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg>
+      </button>
+      <span class="chat-avatar">${ICONS[d.peer_platform] || ICONS.unknown}</span>
       <div class="grow">
         <div class="chat-title">${esc(d.peer_name)}</div>
         <div class="chat-sub mono">${d.direction === "in" ? "←" : "→"} ${esc(d.peer_addr)}</div>
@@ -583,24 +686,51 @@ function openChat(peerId) {
       <button class="icon-btn" title="Send BYE and close" data-act="close">✕</button>
     </header>
     <div class="hs-timeline"></div>
-    <div class="chat"></div>
-    <footer class="chat-input">
-      <input type="text" placeholder="Message ${esc(d.peer_name)}…" maxlength="2000">
-      <button class="icon-btn" data-act="file" title="Send a file" style="color:var(--accent)">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+    <div class="chat-scroll">
+      <div class="chat"></div>
+      <button class="chat-fab hidden" data-act="fab" title="Jump to the latest message" aria-label="Jump to the latest message">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.5v14"/><path d="m6 13 6 6 6-6"/></svg>
       </button>
-      <button class="btn" data-act="send">Send</button>
+    </div>
+    <div class="chat-status hidden"></div>
+    <footer class="chat-input">
+      <button class="ci-attach" data-act="file" title="Send a file" aria-label="Send a file">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+      </button>
+      <textarea rows="1" placeholder="Message ${esc(d.peer_name)}…" maxlength="2000"></textarea>
+      <button class="ci-send" data-act="send" title="Send" aria-label="Send message">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 3.5 10.5 14"/><path d="M21 3.5 14 21l-3.5-7L3 10.5 21 3.5z"/></svg>
+      </button>
     </footer>`;
 
-  const input = view.querySelector("input");
-  view.querySelector('[data-act="close"]').onclick = () =>
-    send({ type: "disconnect", session_id: d.peer_id });
-  view.querySelector('[data-act="send"]').onclick = () => submitChat(s, input);
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") submitChat(s, input);
+  const input = view.querySelector("textarea");
+  input.value = loadDrafts()[peerId] || "";
+  growTextarea(input);
+  input.addEventListener("input", () => {
+    growTextarea(input);
+    saveDraft(peerId, input.value);
   });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault(); /* Enter sends, Shift+Enter adds a newline */
+      submitChat(s, input);
+    }
+  });
+
+  const chatEl = view.querySelector(".chat");
+  chatEl.addEventListener("scroll", () => updateFab(view));
+
+  view.querySelector('[data-act="back"]').onclick = closeChatView;
+  view.querySelector('[data-act="close"]').onclick = () => {
+    send({ type: "disconnect", session_id: d.peer_id });
+  };
+  view.querySelector('[data-act="send"]').onclick = () => submitChat(s, input);
   view.querySelector('[data-act="file"]').onclick = () => pickFile(s);
-  view.querySelector('[data-act="hs"]').onclick = (e) => {
+  view.querySelector('[data-act="fab"]').onclick = () => {
+    chatEl.scrollTop = chatEl.scrollHeight;
+    updateFab(view);
+  };
+  view.querySelector('[data-act="hs"]').onclick = () => {
     s.hsUser = true;
     s.showHs = !s.showHs;
     updateHsToggle(s, view);
@@ -609,12 +739,109 @@ function openChat(peerId) {
   main.appendChild(view);
   renderChatList();
   updateChatView(s, true);
+  if (window.matchMedia("(max-width: 760px)").matches) input.blur(); /* avoid popping the keyboard on open */
+}
+
+function closeChatView() {
+  state.activePeer = null;
+  try { localStorage.removeItem(CHAT_KEY); } catch {}
+  document.body.classList.remove("chat-open");
+  const view = $("chatMain").querySelector(".chat-view");
+  if (view) view.remove();
+  $("chatPlaceholder").classList.remove("hidden");
+  renderChatList();
+}
+
+function growTextarea(el) {
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 120) + "px";
 }
 
 function submitChat(s, input) {
   const text = input.value.trim();
   if (!text) return;
-  if (send({ type: "chat", device_id: s.dto.peer_id, text })) input.value = "";
+  if (send({ type: "chat", device_id: s.dto.peer_id, text })) {
+    input.value = "";
+    growTextarea(input);
+    saveDraft(s.dto.peer_id, "");
+  } else {
+    toast("Cannot send — the server connection is down", "err");
+  }
+}
+
+/* ---------- date dividers + bubbles ---------- */
+
+function dayKey(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+function dayLabel(ts) {
+  const d = new Date(ts);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const that = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diff = Math.round((today - that) / 86400000);
+  if (diff === 0) return "TODAY";
+  if (diff === 1) return "YESTERDAY";
+  const sameYear = d.getFullYear() === now.getFullYear();
+  return d.toLocaleDateString(undefined, {
+    day: "numeric", month: "short",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
+}
+
+function nearBottom(chatEl) {
+  return chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 140;
+}
+
+function updateFab(view) {
+  const chatEl = view.querySelector(".chat");
+  const fab = view.querySelector(".chat-fab");
+  if (!chatEl || !fab) return;
+  fab.classList.toggle("hidden", nearBottom(chatEl));
+}
+
+function appendBubble(s, line, chatEl, opts = {}) {
+  const chat = chatEl || $("chatMain").querySelector(".chat-view .chat");
+  if (!chat) return;
+  const scroll = opts.scroll !== false;
+  const wasNear = nearBottom(chat);
+
+  /* day divider whenever the calendar day changes */
+  const dk = dayKey(line.ts);
+  if (s._lastDay !== dk) {
+    const chip = document.createElement("div");
+    chip.className = "day-chip";
+    chip.textContent = dayLabel(line.ts);
+    chat.appendChild(chip);
+    s._lastDay = dk;
+  }
+
+  const div = document.createElement("div");
+  const time = new Date(line.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (line.dir === "sys") {
+    div.className = "bubble sys";
+    div.textContent = line.text;
+  } else {
+    div.className = "bubble " + line.dir;
+    const body = document.createElement("span");
+    body.className = "btext";
+    body.textContent = line.text;
+    const meta = document.createElement("span");
+    meta.className = "bmeta";
+    meta.textContent = time;
+    div.append(body, meta);
+  }
+  chat.appendChild(div);
+  if (scroll && (wasNear || line.dir === "out" || line.dir === "sys")) {
+    chat.scrollTop = chat.scrollHeight;
+    const fab = chat.closest(".chat-scroll");
+    if (fab) fab.querySelector(".chat-fab").classList.add("hidden");
+  } else if (scroll) {
+    const wrap = chat.closest(".chat-scroll");
+    if (wrap) wrap.querySelector(".chat-fab").classList.remove("hidden");
+  }
 }
 
 function updateChatView(s, fullRebuild = false) {
@@ -631,11 +858,49 @@ function updateChatView(s, fullRebuild = false) {
   if (d.rtt_ms != null) {
     rtt.classList.remove("hidden");
     rtt.textContent = `RTT ${d.rtt_ms} ms`;
+  } else {
+    rtt.classList.add("hidden");
   }
 
-  view.querySelector(".chat-input input").disabled = d.state !== "established";
-  view.querySelector('[data-act="send"]').disabled = d.state !== "established";
-  view.querySelector('[data-act="file"]').disabled = d.state !== "established";
+  const input = view.querySelector(".chat-input textarea");
+  const attach = view.querySelector(".ci-attach");
+  const sendBtn = view.querySelector(".ci-send");
+  const live = d.state === "established";
+  input.disabled = !live;
+  attach.disabled = !live;
+  sendBtn.disabled = !live;
+  input.placeholder = live
+    ? `Message ${d.peer_name}…`
+    : d.state === "connecting" ? "handshaking…" : "reconnect to continue the conversation";
+
+  /* status strip: handshake progress / reconnect affordance */
+  const strip = view.querySelector(".chat-status");
+  if (d.state === "established") {
+    strip.classList.add("hidden");
+    strip.innerHTML = "";
+  } else {
+    strip.classList.remove("hidden");
+    if (d.state === "connecting") {
+      strip.innerHTML = `<span class="spin"></span> completing the TCP handshake…`;
+    } else {
+      const known = state.devices.has(d.peer_id);
+      const why = d.state === "error" && d.error ? esc(d.error) : "connection closed";
+      strip.innerHTML = `
+        <span class="dim">${why}</span>
+        <button class="btn small" data-act="reconnect" ${known ? "" : 'disabled title="Device is not on this network right now"'}>
+          ${known ? "Reconnect" : "Retry when back"}
+        </button>`;
+      const btn = strip.querySelector('[data-act="reconnect"]');
+      if (btn && known) {
+        btn.onclick = () => {
+          state.pendingConnect = d.peer_id;
+          if (!send({ type: "connect", device_id: d.peer_id })) {
+            toast("Cannot connect — the server connection is down", "err");
+          }
+        };
+      }
+    }
+  }
 
   /* handshake disclosure: visible while connecting (interesting to watch),
      auto-collapsed once established unless the user pinned it open */
@@ -663,14 +928,16 @@ function updateChatView(s, fullRebuild = false) {
   const chatLen = (d.chat || []).length;
   if (fullRebuild || chatLen !== s._rendered) {
     chatEl.innerHTML = "";
+    s._lastDay = null;
     if (chatLen === 0) {
       const hint = document.createElement("div");
       hint.className = "bubble sys hint";
       hint.textContent = "start of the conversation — say hi or attach a file";
       chatEl.appendChild(hint);
     }
-    for (const line of d.chat || []) appendBubble(s, line, chatEl);
+    for (const line of d.chat || []) appendBubble(s, line, chatEl, { scroll: false });
     s._rendered = chatLen;
+    chatEl.scrollTop = chatEl.scrollHeight;
   }
   renderTransfers(s, chatEl);
 }
@@ -683,26 +950,6 @@ function updateHsToggle(s, view) {
   btn.textContent = s.showHs ? "handshake ⌃" : "handshake ⌄";
 }
 
-function appendBubble(s, line, chatEl) {
-  const chat = chatEl || $("chatMain").querySelector(".chat-view .chat");
-  if (!chat) return;
-  const div = document.createElement("div");
-  const time = new Date(line.ts).toLocaleTimeString();
-  if (line.dir === "sys") {
-    div.className = "bubble sys";
-    div.textContent = line.text;
-  } else {
-    div.className = "bubble " + line.dir;
-    div.textContent = line.text;
-    const t = document.createElement("span");
-    t.className = "btime";
-    t.textContent = time;
-    div.appendChild(t);
-  }
-  chat.appendChild(div);
-  chat.scrollTop = chat.scrollHeight;
-}
-
 /* ================================================================== file events */
 
 function renderTransfers(s, chatEl) {
@@ -712,43 +959,52 @@ function renderTransfers(s, chatEl) {
     let el = chat.querySelector(`[data-tid="${CSS.escape(t.tid)}"]`);
     if (!el) {
       el = document.createElement("div");
-      el.className = "transfer";
+      el.className = "transfer " + t.direction;
       el.dataset.tid = t.tid;
       el.innerHTML = `
         <div class="t-head">
-          <span class="t-name">${t.direction === "in" ? "↓" : "↑"} ${esc(t.name)}</span>
+          <span class="t-ic">${t.direction === "in"
+            ? `<svg viewBox="0 0 24 24" ${GLYPH}><path d="M12 4v12"/><path d="m6.5 10.5 5.5 5.5 5.5-5.5"/><path d="M5 19.5h14"/></svg>`
+            : `<svg viewBox="0 0 24 24" ${GLYPH}><path d="M12 19.5v-12"/><path d="m6.5 13 5.5-5.5 5.5 5.5"/><path d="M5 4.5h14"/></svg>`}</span>
+          <span class="t-name">${esc(t.name)}</span>
           <span class="t-status"></span>
         </div>
         <div class="bar"><div class="fill"></div></div>`;
       chat.appendChild(el);
-      chat.scrollTop = chat.scrollHeight;
+      const wrap = chat.closest(".chat-scroll");
+      if (nearBottom(chat)) {
+        chat.scrollTop = chat.scrollHeight;
+        if (wrap) wrap.querySelector(".chat-fab").classList.add("hidden");
+      }
     }
     const pct = t.total > 0 ? Math.min(100, Math.round((t.bytes / t.total) * 100)) : 0;
     el.querySelector(".fill").style.width = pct + "%";
     el.querySelector(".bar").className = "bar " + (t.status === "done" ? "done" : t.status === "error" ? "error" : "");
     const statusEl = el.querySelector(".t-status");
     if (t.status === "in-progress") statusEl.textContent = fmtBytes(t.bytes) + " / " + fmtBytes(t.total);
-    else if (t.status === "done") statusEl.textContent = "✓ " + (t.detail ? "→ " + t.detail.split("/").pop() : "complete");
+    else if (t.status === "done") statusEl.textContent = "✓ " + (t.detail ? "→ " + t.detail.split(/[\\/]/).pop() : "complete");
     else statusEl.textContent = "✗ " + (t.detail || "failed");
   }
 }
 
-/* Chat + completion lines for a transfer come from the server as `chat`
-   events (single source of truth). The UI only adds the “↓ receiving …”
-   line for a brand-new inbound transfer. */
 function handleFileEvent(peerId, ev) {
   const s = state.sessions.get(peerId);
   if (!s) return;
   if (!s.dto.chat) s.dto.chat = [];
-  if (ev.status === "start" && ev.direction === "in") {
+  if (ev.status === "start") {
     s.dto.chat.push({ dir: "sys", text: `↓ ${ev.detail}`, ts: Date.now() });
+  } else if (ev.status === "done" && ev.direction === "in" && ev.detail) {
+    s.dto.chat.push({ dir: "sys", text: `✓ saved → ${ev.detail}`, ts: Date.now() });
+  } else if (ev.status === "error") {
+    s.dto.chat.push({ dir: "sys", text: `✗ ${ev.detail || "transfer failed"}`, ts: Date.now() });
   }
   if (state.activePeer === peerId) updateChatView(s);
-  else renderChatList();
+  renderChatList();
 }
 
 /* ============================================================ file pickup */
 
+const MAX_SEND_BYTES = 256 * 1024 * 1024; /* mirrors the server's cap */
 let fileTargetSession = null;
 $("filePicker").addEventListener("change", async (e) => {
   const file = e.target.files[0];
@@ -758,6 +1014,10 @@ $("filePicker").addEventListener("change", async (e) => {
 });
 
 function pickFile(s) {
+  if (s.dto.state !== "established") {
+    toast("Wait for the handshake to finish first", "warn");
+    return;
+  }
   fileTargetSession = s;
   $("filePicker").click();
 }
@@ -765,6 +1025,10 @@ function pickFile(s) {
 async function sendFile(s, file) {
   const peerId = s.dto.peer_id;
   if (s.dto.state !== "established") return;
+  if (file.size > MAX_SEND_BYTES) {
+    toast(`“${file.name}” is ${fmtBytes(file.size)} — the transfer limit is 256 MB`, "err", 5000);
+    return;
+  }
   const tid = "f" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   const buf = new Uint8Array(await file.arrayBuffer());
 
@@ -776,10 +1040,7 @@ async function sendFile(s, file) {
     } catch { /* insecure origin: skip integrity check */ }
   }
 
-  if (!send({ type: "file-begin", device_id: peerId, tid, name: file.name, size: file.size, sha256: sha })) {
-    abortTransfer(s, peerId, tid, file.name, "control channel lost");
-    return;
-  }
+  send({ type: "file-begin", device_id: peerId, tid, name: file.name, size: file.size, sha256: sha });
   if (!s.dto.chat) s.dto.chat = [];
   s.dto.chat.push({ dir: "sys", text: `↑ sending “${file.name}” (${fmtBytes(file.size)})…`, ts: Date.now() });
   if (state.activePeer === peerId) {
@@ -790,33 +1051,25 @@ async function sendFile(s, file) {
 
   const CHUNK = 48 * 1024;
   for (let seq = 0, off = 0; off < buf.length; seq++, off += CHUNK) {
-    const slice = buf.subarray(off, Math.min(off + CHUNK, buf.length));
-    if (!send({ type: "file-chunk", device_id: peerId, tid, seq, data: bufToB64(slice) })) {
-      abortTransfer(s, peerId, tid, file.name, "control channel lost mid-transfer");
+    /* stop if the session died mid-transfer (the card turns into an error) */
+    if (s.dto.state !== "established") {
+      toast(`Transfer of “${file.name}” aborted — connection closed`, "err");
       return;
     }
-    await sleep(4);   /* gentle pacing so the WS + TCP writer can keep up */
+    const slice = buf.subarray(off, Math.min(off + CHUNK, buf.length));
+    if (!send({ type: "file-chunk", device_id: peerId, tid, seq, data: bufToB64(slice) })) {
+      toast(`Transfer of “${file.name}” aborted — server connection lost`, "err");
+      return;
+    }
+    /* backpressure: wait for the socket buffer to drain so a big file cannot
+       pile up unbounded memory in the browser */
+    let guard = 0;
+    while (state.ws && state.ws.readyState === 1 && state.ws.bufferedAmount > 1024 * 1024) {
+      await sleep(15);
+      if (++guard > 4000) break; /* ~60 s stall → give up waiting */
+    }
   }
-  if (!send({ type: "file-end", device_id: peerId, tid })) {
-    abortTransfer(s, peerId, tid, file.name, "control channel lost at the end");
-    return;
-  }
-}
-
-/* The control WebSocket died mid-transfer: stop looping, tell the user once
-   and mark the progress row as failed (the server never saw the file). */
-function abortTransfer(s, peerId, tid, name, why) {
-  if (!s.dto.chat) s.dto.chat = [];
-  s.dto.chat.push({ dir: "sys", text: `⚠ “${name}” not sent — ${why}`, ts: Date.now() });
-  const t = (s.dto.transfers || []).find((x) => x.tid === tid);
-  if (t) { t.status = "error"; t.detail = why; }
-  if (state.activePeer === peerId) {
-    const chatEl = $("chatMain").querySelector(".chat-view .chat");
-    if (chatEl) appendBubble(s, s.dto.chat[s.dto.chat.length - 1], chatEl);
-    s._rendered = s.dto.chat.length;
-    updateChatView(s);
-  }
-  renderChatList();
+  send({ type: "file-end", device_id: peerId, tid });
 }
 
 function bufToB64(bytes) {
@@ -832,9 +1085,12 @@ function bufToB64(bytes) {
 
 function updateNavBadge() {
   const total = [...state.sessions.values()].reduce((n, s) => n + (s.unread || 0), 0);
-  const badge = $("navBadge");
-  badge.textContent = total > 99 ? "99+" : total;
-  badge.classList.toggle("hidden", total === 0);
+  for (const id of ["navBadge", "tabBadge"]) {
+    const badge = $(id);
+    if (!badge) continue;
+    badge.textContent = total > 99 ? "99+" : total;
+    badge.classList.toggle("hidden", total === 0);
+  }
 }
 
 /* ================================================================== connect requests
@@ -914,7 +1170,16 @@ $("passInput").addEventListener("keydown", (e) => {
 function appendLog(level, msg, ts) {
   state.logCount++;
   $("statLogs").textContent = state.logCount;
-  if (state.paused) return;
+  if (state.paused) {
+    /* keep buffering — Pause freezes the view, it does not discard */
+    state.logBuffer.push({ level, msg, ts });
+    if (state.logBuffer.length > 250) state.logBuffer.shift();
+    return;
+  }
+  appendLogLine(level, msg, ts);
+}
+
+function appendLogLine(level, msg, ts) {
   const box = $("console");
   const div = document.createElement("div");
   div.className = "log-line";
@@ -930,9 +1195,15 @@ function appendLog(level, msg, ts) {
 $("pauseLog").addEventListener("click", () => {
   state.paused = !state.paused;
   $("pauseLog").textContent = state.paused ? "Resume" : "Pause";
+  if (!state.paused) {
+    /* flush everything that happened while paused */
+    for (const l of state.logBuffer) appendLogLine(l.level, l.msg, l.ts);
+    state.logBuffer = [];
+  }
 });
 $("clearLog").addEventListener("click", () => {
   $("console").innerHTML = "";
+  state.logBuffer = [];
   state.logCount = 0;
   $("statLogs").textContent = "0";
 });
@@ -954,9 +1225,14 @@ setInterval(() => {
     const age = Math.max(0, Math.round((Date.now() - Number(el.dataset.seen)) / 1000));
     el.textContent = age < 3 ? "just now" : `seen ${age}s ago`;
   });
-  const secs = Math.round(performance.now() / 1000);
+  /* uptime tracks the *server*, not this browser tab */
+  const secs = state.serverBoot
+    ? Math.max(0, Math.round((Date.now() - state.serverBoot) / 1000))
+    : Math.round(performance.now() / 1000);
   $("statUptime").textContent =
-    secs < 60 ? secs + "s" : Math.floor(secs / 60) + "m " + (secs % 60) + "s";
+    secs < 60 ? secs + "s"
+    : secs < 3600 ? Math.floor(secs / 60) + "m " + (secs % 60) + "s"
+    : Math.floor(secs / 3600) + "h " + Math.floor((secs % 3600) / 60) + "m";
 }, 1000);
 
 setInterval(() => {
@@ -982,6 +1258,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (function boot() {
   $("verTag").textContent = "v" + APP_VERSION;
   $("setVer").textContent = "v" + APP_VERSION;
+  $("splashVer").textContent = "v" + APP_VERSION;
+
   /* no choice saved yet → follow the OS (system) without persisting it */
   const savedTheme = localStorage.getItem(THEME_KEY);
   setTheme(savedTheme || "system", !!savedTheme);
@@ -989,8 +1267,32 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   renderAccess();
   try { state.devicePasswords = JSON.parse(localStorage.getItem("single-device-pw") || "{}"); } catch {}
   applySide(localStorage.getItem(SIDE_KEY) === "mini");
-  try { history.replaceState({ page: "home" }, ""); } catch {}
-  showPage("home");
+
+  /* restore where the user left off: page, open conversation, filter */
+  const savedFilter = localStorage.getItem("single-filter");
+  if (savedFilter) {
+    state.filter = savedFilter;
+    document.querySelectorAll("#filters .chip").forEach((c) =>
+      c.classList.toggle("active", c.dataset.f === savedFilter));
+  }
+  showPage(localStorage.getItem(PAGE_KEY) || "home");
+  /* re-open the conversation the user had open — but only when they were
+     actually on the Chats page; the saved page always wins otherwise */
+  const savedChat = localStorage.getItem(CHAT_KEY);
+  if (savedChat && state.page === "chats") {
+    state.pendingOpenPeer = savedChat;
+    /* if the session is already here (e.g. page reload) open it now */
+    if (state.sessions.has(savedChat)) {
+      const p = state.pendingOpenPeer;
+      state.pendingOpenPeer = null;
+      showPage("chats");
+      openChat(p);
+    }
+  }
+
   connect();
   appendLog("info", "dashboard booted — connecting to control channel…", Date.now());
+
+  /* never let a stuck splash cover the app */
+  setTimeout(hideSplash, 5000);
 })();

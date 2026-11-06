@@ -20,6 +20,7 @@
 use crate::access::{AccessControl, AccessMode, Approval, ConnectRequestInfo};
 use crate::config::{MAGIC, PROTO_VER};
 use crate::files::{self, InboundTransfer, MAX_FILE_BYTES};
+use crate::persist::{Persist, Store};
 use crate::protocol::*;
 use crate::registry::Device;
 use crate::util::{human_bytes, log_bus, now_ms, nonce};
@@ -92,6 +93,7 @@ pub struct P2pManager {
     self_identity: Arc<RwLock<Identity>>,
     received_dir: PathBuf,
     access: Arc<AccessControl>,
+    persist: Arc<Persist>,
     sessions: Arc<Mutex<HashMap<String, SessionState>>>,
 }
 
@@ -101,14 +103,58 @@ impl P2pManager {
         self_identity: Arc<RwLock<Identity>>,
         received_dir: PathBuf,
         access: Arc<AccessControl>,
+        persist: Arc<Persist>,
     ) -> Arc<Self> {
         Arc::new(Self {
             bus,
             self_identity,
             received_dir,
             access,
+            persist,
             sessions: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Re-create yesterday's conversations from the persisted store so the
+    /// Chats page (and every conversation's history) survives a restart.
+    /// They come back as `closed` sessions — one click on Reconnect resumes.
+    pub fn restore_sessions(&self, store: &Store) {
+        let mut restored = 0usize;
+        for (peer_id, arch) in &store.chats {
+            if arch.chat.is_empty() && arch.transfers.is_empty() {
+                continue;
+            }
+            let mut state = SessionState::new(
+                (
+                    peer_id.clone(),
+                    arch.peer_name.clone(),
+                    arch.peer_platform.clone(),
+                    arch.peer_addr.clone(),
+                ),
+                &arch.direction,
+            );
+            state.state = "closed".to_string();
+            state.chat = arch.chat.clone();
+            state.transfers = arch.transfers.clone();
+            for t in state.transfers.iter_mut() {
+                if t.status == "in-progress" {
+                    t.status = "error".into();
+                    t.detail = "interrupted by a restart".into();
+                }
+            }
+            if let Some(last) = state.chat.last() {
+                state.started_ts = last.ts;
+            }
+            self.sessions_lock().insert(peer_id.clone(), state);
+            restored += 1;
+        }
+        if restored > 0 {
+            log_bus(
+                &self.bus,
+                "info",
+                format!("restored {restored} conversation{} from disk", if restored == 1 { "" } else { "s" }),
+            );
+        }
     }
 
     /// Bind the P2P TCP listener and start accepting peers.
@@ -219,22 +265,49 @@ impl P2pManager {
             text: text.into(),
             ts: now_ms(),
         };
-        {
+        let meta = {
             let mut map = self.sessions_lock();
             if let Some(s) = map.get_mut(peer_id) {
                 s.chat.push(line.clone());
                 if s.chat.len() > CHAT_HISTORY_CAP {
                     s.chat.drain(..s.chat.len() - CHAT_HISTORY_CAP);
                 }
+                (
+                    s.peer_name.clone(),
+                    s.peer_platform.clone(),
+                    s.peer_addr.clone(),
+                    s.direction.clone(),
+                )
             } else {
                 return None;
             }
-        }
+        };
         let _ = self.bus.send(ServerMsg::Chat {
             peer_id: peer_id.to_string(),
             line: line.clone(),
         });
+        let (n, p, a, d) = meta;
+        self.persist
+            .record_chat(peer_id, &n, &p, &a, &d, line.clone());
         Some(line)
+    }
+
+    /// Persist one transfer card (called outside the sessions lock).
+    fn persist_transfer(&self, peer_id: &str, t: TransferDto) {
+        let meta = {
+            let map = self.sessions_lock();
+            map.get(peer_id).map(|s| {
+                (
+                    s.peer_name.clone(),
+                    s.peer_platform.clone(),
+                    s.peer_addr.clone(),
+                    s.direction.clone(),
+                )
+            })
+        };
+        if let Some((n, p, a, d)) = meta {
+            self.persist.record_transfer(peer_id, &n, &p, &a, &d, t);
+        }
     }
 
     fn close_session(&self, peer_id: &str, reason: &str) {
@@ -289,6 +362,12 @@ impl P2pManager {
             "out",
         );
         state.password = password.to_string();
+        // Re-attach the persisted history so a reconnect continues the same
+        // conversation instead of starting an empty one.
+        if let Some(arch) = self.persist.archive_for(&device.id) {
+            state.chat = arch.chat;
+            state.transfers = arch.transfers;
+        }
         self.sessions_lock().insert(device.id.clone(), state);
         self.broadcast_session(&device.id, true);
         log_bus(
@@ -318,7 +397,7 @@ impl P2pManager {
     }
 
     async fn initiate(self: Arc<Self>, device: Device) {
-        let peer_id = device.id.clone();
+        let mut peer_id = device.id.clone();
 
         // Step 1: TCP connect (kernel-level SYN / SYN-ACK / ACK).
         let t0 = std::time::Instant::now();
@@ -391,7 +470,7 @@ impl P2pManager {
         };
         let Wire::HelloAck {
             ok,
-            id: _peer_fn,
+            id: peer_fn,
             name: peer_name,
             platform: peer_platform,
             echo_nonce,
@@ -418,6 +497,29 @@ impl P2pManager {
             self.fail_session(&peer_id, "HELLO_ACK nonce mismatch");
             return;
         }
+        // The peer's HELLO_ACK self-reports an id that may differ from the
+        // mDNS fullname we used as the sessions-map key (it may have
+        // re-announced since discovery). Re-key the entry so every later
+        // lookup by peer id succeeds — otherwise the session would exist but
+        // be unreachable (chat sends would fail with "no established session").
+        if peer_fn != peer_id {
+            let moved = {
+                let mut map = self.sessions_lock();
+                map.remove(&peer_id).map(|mut s| {
+                    s.peer_id = peer_fn.clone();
+                    s
+                })
+            };
+            if let Some(s) = moved {
+                self.sessions_lock().insert(peer_fn.clone(), s);
+            }
+            log_bus(
+                &self.bus,
+                "info",
+                format!("peer id changed since discovery — re-keyed session to {peer_fn}"),
+            );
+            peer_id = peer_fn.clone();
+        }
         let started_ts = self
             .sessions_lock()
             .get(&peer_id)
@@ -428,11 +530,7 @@ impl P2pManager {
             if let Some(s) = map.get_mut(&peer_id) {
                 s.peer_name = peer_name.clone();
                 s.peer_platform = peer_platform.clone();
-                // Keep the registry fullname as the session key / dto id.
-                // Overwriting it with the peer's self-reported fullname would
-                // desync the HashMap key from SessionState.peer_id whenever
-                // the two differ (stale registry entry), leaving a session
-                // that looks established but has no writer or ping loop.
+                s.peer_id = peer_fn.clone();
             }
         }
         self.add_step(
@@ -470,9 +568,7 @@ impl P2pManager {
             format!("handshake complete with {peer_name} in {total_ms:.1} ms"),
         );
 
-        // Keyed by the registry fullname (same as the sessions map insert in
-        // connect_to), NOT by the peer's self-reported id.
-        self.run_established(wr, lines, &peer_id, started_ts).await;
+        self.run_established(wr, lines, &peer_fn, started_ts).await;
     }
 
     // ------------------------------------------------------------------
@@ -617,7 +713,7 @@ impl P2pManager {
 
         // Register the inbound session.
         self.drop_session(&peer_fn);
-        let state = SessionState::new(
+        let mut state = SessionState::new(
             (
                 peer_fn.clone(),
                 peer_name.clone(),
@@ -626,6 +722,11 @@ impl P2pManager {
             ),
             "in",
         );
+        // Re-attach the persisted history (same conversation as before).
+        if let Some(arch) = self.persist.archive_for(&peer_fn) {
+            state.chat = arch.chat;
+            state.transfers = arch.transfers;
+        }
         let started_ts = state.started_ts;
         {
             let mut map = self.sessions_lock();
@@ -754,19 +855,32 @@ impl P2pManager {
                     text,
                     ts,
                 };
-                {
+                let meta = {
                     let mut map = self.sessions_lock();
                     if let Some(s) = map.get_mut(peer_id) {
                         s.chat.push(line.clone());
                         if s.chat.len() > CHAT_HISTORY_CAP {
                             s.chat.drain(..s.chat.len() - CHAT_HISTORY_CAP);
                         }
+                        Some((
+                            s.peer_name.clone(),
+                            s.peer_platform.clone(),
+                            s.peer_addr.clone(),
+                            s.direction.clone(),
+                        ))
+                    } else {
+                        None
                     }
-                }
+                };
                 let _ = self.bus.send(ServerMsg::Chat {
                     peer_id: peer_id.to_string(),
-                    line,
+                    line: line.clone(),
                 });
+                /* incoming peer lines are persisted too, so a restart
+                   restores the full conversation (not just our half) */
+                if let Some((n, p, a, d)) = meta {
+                    self.persist.record_chat(peer_id, &n, &p, &a, &d, line);
+                }
             }
             Wire::Ping { t } => {
                 send(self, Wire::Pong { t }).await;
@@ -805,6 +919,15 @@ impl P2pManager {
                     .await;
                     return std::ops::ControlFlow::Continue(());
                 }
+                let card = TransferDto {
+                    tid: tid.clone(),
+                    direction: "in".into(),
+                    name: name.clone(),
+                    bytes: 0,
+                    total: size,
+                    status: "in-progress".into(),
+                    detail: String::new(),
+                };
                 {
                     let mut map = self.sessions_lock();
                     if let Some(s) = map.get_mut(peer_id) {
@@ -815,20 +938,10 @@ impl P2pManager {
                             sha256,
                             buf: Vec::with_capacity(size as usize),
                         });
-                        push_transfer(
-                            s,
-                            TransferDto {
-                                tid: tid.clone(),
-                                direction: "in".into(),
-                                name: name.clone(),
-                                bytes: 0,
-                                total: size,
-                                status: "in-progress".into(),
-                                detail: String::new(),
-                            },
-                        );
+                        push_transfer(s, card.clone());
                     }
                 }
+                self.persist_transfer(peer_id, card);
                 self.broadcast_session(peer_id, false);
                 let detail = format!("receiving “{name}” ({})", human_bytes(size));
                 let _ = self.bus.send(ServerMsg::File {
@@ -940,7 +1053,17 @@ impl P2pManager {
                 };
                 if let Some(tr) = inbound {
                     if tr.tid != tid {
-                        // stale; keep nothing
+                        // stale; keep nothing — but still answer so the sender
+                        // does not hang on an in-progress card forever
+                        send(
+                            self,
+                            Wire::FileDone {
+                                tid: tid.clone(),
+                                ok: false,
+                                detail: "stale transfer id".into(),
+                            },
+                        )
+                        .await;
                     } else {
                         let sha_ok =
                             tr.sha256.is_empty() || files::sha256_hex(&tr.buf) == tr.sha256;
@@ -963,6 +1086,7 @@ impl P2pManager {
                             },
                         )
                         .await;
+                        let mut final_card = None;
                         {
                             let mut map = self.sessions_lock();
                             if let Some(s) = map.get_mut(peer_id) {
@@ -974,8 +1098,12 @@ impl P2pManager {
                                     t.status = if ok { "done" } else { "error" }.into();
                                     t.bytes = tr.buf.len() as u64;
                                     t.detail = detail.clone();
+                                    final_card = Some(t.clone());
                                 }
                             }
+                        }
+                        if let Some(card) = final_card {
+                            self.persist_transfer(peer_id, card);
                         }
                         if ok {
                             self.push_chat_line(
@@ -1002,6 +1130,19 @@ impl P2pManager {
                         }
                         self.broadcast_session(peer_id, false);
                     }
+                } else {
+                    // FileEnd with no matching inbound transfer (unsolicited
+                    // or already finished): answer so the sender's card does
+                    // not hang in "in-progress" forever.
+                    send(
+                        self,
+                        Wire::FileDone {
+                            tid: tid.clone(),
+                            ok: false,
+                            detail: "no such transfer".into(),
+                        },
+                    )
+                    .await;
                 }
             }
             Wire::FileDone { tid, ok, detail } => {
@@ -1025,6 +1166,7 @@ impl P2pManager {
                     found
                 };
                 if let Some(t) = updated {
+                    self.persist_transfer(peer_id, t.clone());
                     let _ = self.bus.send(ServerMsg::File {
                         peer_id: peer_id.to_string(),
                         event: FileEvent {
@@ -1092,6 +1234,15 @@ impl P2pManager {
         size: u64,
         sha256: &str,
     ) -> Result<(), String> {
+        let card = TransferDto {
+            tid: tid.to_string(),
+            direction: "out".into(),
+            name: name.to_string(),
+            bytes: 0,
+            total: size,
+            status: "in-progress".into(),
+            detail: String::new(),
+        };
         let tx = {
             let mut map = self.sessions_lock();
             let s = map
@@ -1100,21 +1251,11 @@ impl P2pManager {
             if s.state != "established" {
                 return Err("session not established".into());
             }
-            push_transfer(
-                s,
-                TransferDto {
-                    tid: tid.to_string(),
-                    direction: "out".into(),
-                    name: name.to_string(),
-                    bytes: 0,
-                    total: size,
-                    status: "in-progress".into(),
-                    detail: String::new(),
-                },
-            );
+            push_transfer(s, card.clone());
             s.to_peer.clone()
         };
         let tx = tx.ok_or("connection lost")?;
+        self.persist_transfer(device_id, card);
         self.broadcast_session(device_id, false);
         tx.send(Wire::FileStart {
             tid: tid.to_string(),
@@ -1186,10 +1327,14 @@ fn dto(s: &SessionState, include_chat: bool) -> SessionDto {
 }
 
 fn push_transfer(s: &mut SessionState, t: TransferDto) {
-    // Drop the oldest FINISHED transfer beyond the cap. Never evict an
-    // in-progress one — the receiver keeps updating it by tid.
+    // Drop the oldest finished transfer beyond the cap.
     if s.transfers.len() >= TRANSFER_LIST_CAP {
-        if let Some(pos) = s.transfers.iter().position(|x| x.status != "in-progress") {
+        if let Some(pos) = s
+            .transfers
+            .iter()
+            .position(|x| x.status != "in-progress")
+            .or(Some(0))
+        {
             s.transfers.remove(pos);
         }
     }

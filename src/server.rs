@@ -10,6 +10,7 @@ use crate::access::AccessControl;
 use crate::config::{Config, SERVICE_TYPE};
 use crate::mdns::Mdns;
 use crate::p2p::P2pManager;
+use crate::persist::Persist;
 use crate::protocol::*;
 use crate::registry::Registry;
 use crate::util::{log_bus, now_ms};
@@ -41,6 +42,7 @@ pub struct AppState {
     pub self_identity: Arc<RwLock<Identity>>,
     pub p2p: Arc<P2pManager>,
     pub access: Arc<AccessControl>,
+    pub persist: Arc<Persist>,
     pub started: std::time::Instant,
 }
 
@@ -90,7 +92,28 @@ fn build_router(state: Arc<AppState>) -> Router {
 }
 
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    // Ctrl-C everywhere; SIGTERM too (that is what Android's service
+    // manager and most supervisors send) so the mDNS goodbye + state
+    // flush actually happen on phones.
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,8 +201,32 @@ async fn ws_session(socket: WebSocket, st: Arc<AppState>) {
             .send(Message::Text(serde_json::to_string(&ServerMsg::Session { session }).unwrap().into()))
             .await;
     }
-    // Inbound connection policy (Home › Protocol) — the browser mirrors it
-    // into localStorage and re-applies it on every reconnect.
+    // Replay the persisted activity-log tail so the Activity page picks up
+    // where the last session left off (live lines follow as Log events).
+    {
+        let store = st.persist.snapshot();
+        if !store.logs.is_empty() {
+            let _ = tx
+                .send(Message::Text(
+                    serde_json::to_string(&ServerMsg::Logs {
+                        lines: store
+                            .logs
+                            .iter()
+                            .map(|l| PersistedLog {
+                                level: l.level.clone(),
+                                msg: l.msg.clone(),
+                                ts: l.ts,
+                            })
+                            .collect(),
+                    })
+                    .unwrap()
+                    .into(),
+                ))
+                .await;
+        }
+    }
+    // Inbound connection policy (Home › Protocol) — persisted server-side,
+    // so this snapshot is authoritative and applies with no dashboard open.
     let _ = tx
         .send(Message::Text(serde_json::to_string(&st.access.snapshot()).unwrap().into()))
         .await;
@@ -262,6 +309,8 @@ async fn handle_client(st: &Arc<AppState>, msg: ClientMsg, tx: &mut SplitSink<We
                 server_time: now_ms(),
             };
             let _ = st.bus.send(hello);
+            // The chosen name survives restarts (persisted state file).
+            st.persist.set_name(&name);
             log_bus(
                 &st.bus,
                 "ok",

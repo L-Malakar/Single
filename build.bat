@@ -9,17 +9,18 @@ rem  WHAT IT DOES
 rem    1. compiles the release binaries with cargo
 rem    2. creates a fresh folder  Single\
 rem    3. fills it with everything the app needs:
-rem         Single-v0.1.1.exe        the app - double-click to run
+rem         Single-v0.1.3.exe        the app - double-click to run
 rem         Launch Single.bat        friendly starter
 rem         enable-firewall.bat      one-time LAN visibility fix (admin)
 rem         README.txt               end-user notes
 rem         received\                incoming files land here
 rem         tools\Device-Simulator.exe   optional 5-fake-device demo
-rem    4. zips the folder to Single-v0.1.1.zip for sharing
+rem    4. zips the folder to Single-v0.1.3.zip for sharing
 rem    5. puts the Android app next to the folder:
-rem         single-v0.1.1.apk  install on a phone and test for real
+rem         single-v0.1.3.apk  install on a phone and test for real
 rem       The prebuilt APK that ships with the source zip is used as-is;
 rem       when it is missing, a fresh one is built from source.
+rem       NOTE: the APK is .gitignored - git never pushes the binary itself.
 rem
 rem  REQUIREMENTS
 rem    Rust installed on Windows  -  https://rustup.rs  (rustup default stable)
@@ -33,7 +34,7 @@ rem ===========================================================================
 
 rem ---- configuration --------------------------------------------------------
 set "APP_NAME=Single"
-set "APP_VERSION=0.1.1"
+set "APP_VERSION=0.1.3"
 
 rem ---- always run from the folder this script lives in ----------------------
 cd /d "%~dp0"
@@ -48,7 +49,7 @@ set "TOML_VERSION="
 for /f "tokens=2 delims==" %%a in ('findstr /b /c:"version " Cargo.toml') do set "TOML_VERSION=%%a"
 if defined TOML_VERSION set TOML_VERSION=%TOML_VERSION: =%
 if defined TOML_VERSION set APP_VERSION=%TOML_VERSION:"=%
-echo(%APP_VERSION%|findstr /r "^[0-9]" >nul || set "APP_VERSION=0.1.1"
+echo(%APP_VERSION%|findstr /r "^[0-9]" >nul || set "APP_VERSION=0.1.3"
 
 set "SERVER_BIN=p2p-bridge-server"
 set "DIST=%APP_NAME%"
@@ -275,8 +276,9 @@ if errorlevel 1 goto :apk_failed
 
 if not exist "android\app\src\main\jniLibs\arm64-v8a" mkdir "android\app\src\main\jniLibs\arm64-v8a"
 if not exist "android\app\src\main\jniLibs\x86_64"   mkdir "android\app\src\main\jniLibs\x86_64"
-copy /y "target\aarch64-linux-android\release\%SERVER_BIN%.exe" "android\app\src\main\jniLibs\arm64-v8a\libsingle.so" >nul
-copy /y "target\x86_64-linux-android\release\%SERVER_BIN%.exe"  "android\app\src\main\jniLibs\x86_64\libsingle.so" >nul
+rem NOTE: android cross-builds have NO .exe extension, even on Windows.
+copy /y "target\aarch64-linux-android\release\%SERVER_BIN%" "android\app\src\main\jniLibs\arm64-v8a\libsingle.so" >nul
+copy /y "target\x86_64-linux-android\release\%SERVER_BIN%"   "android\app\src\main\jniLibs\x86_64\libsingle.so" >nul
 if not exist "android\app\src\main\jniLibs\arm64-v8a\libsingle.so" goto :apk_failed
 
 rem -- 5. run gradle to package the APK -----------------------------------------

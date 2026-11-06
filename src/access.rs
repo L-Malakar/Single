@@ -8,11 +8,12 @@
 //! - [`AccessMode::Protected`] — any device may connect, but its HELLO frame
 //!   must carry the password chosen by the operator.
 //!
-//! The dashboard sets the mode with a `set-access` WebSocket message; the
-//! choice lives in the browser (localStorage) so it survives server restarts
-//! and is re-applied every time a dashboard reconnects. The password is kept
-//! in server memory only.
+//! The dashboard sets the mode with a `set-access` WebSocket message. The
+//! choice is persisted server-side (`crate::persist`) so it survives server
+//! restarts **and applies even while no dashboard is open**; the browser's
+//! localStorage copy is only a render cache.
 
+use crate::persist::Persist;
 use crate::protocol::ServerMsg;
 use crate::util::{log_bus, nonce, now_ms};
 use std::collections::HashMap;
@@ -86,15 +87,27 @@ pub struct AccessControl {
     mode: RwLock<AccessMode>,
     password: RwLock<String>,
     pending: Mutex<HashMap<String, PendingApproval>>,
+    persist: Arc<Persist>,
 }
 
 impl AccessControl {
-    pub fn new(bus: broadcast::Sender<ServerMsg>) -> Arc<Self> {
+    pub fn new(
+        bus: broadcast::Sender<ServerMsg>,
+        persist: Arc<Persist>,
+        saved_mode: Option<String>,
+        saved_password: Option<String>,
+    ) -> Arc<Self> {
+        let mode = saved_mode
+            .as_deref()
+            .and_then(AccessMode::parse)
+            .unwrap_or(AccessMode::Private); // default: ask first
+        let password = saved_password.unwrap_or_default();
         Arc::new(Self {
             bus,
-            mode: RwLock::new(AccessMode::Private), // default: ask first
-            password: RwLock::new(String::new()),
+            mode: RwLock::new(mode),
+            password: RwLock::new(password),
             pending: Mutex::new(HashMap::new()),
+            persist,
         })
     }
 
@@ -125,6 +138,9 @@ impl AccessControl {
         if !password.is_empty() {
             *self.password.write().unwrap() = password.to_string();
         }
+        // Persist the *effective* policy so it survives restarts.
+        let effective_pw = self.password.read().unwrap().clone();
+        self.persist.set_access(mode.as_str(), &effective_pw);
         let _ = self.bus.send(self.snapshot());
         Ok(mode)
     }

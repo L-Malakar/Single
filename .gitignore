@@ -6,4 +6,5 @@ Cargo.lock
 /.tools
 /Single
 /Single-v*.zip
-single-v0.1.1.apk
+# the prebuilt APK ships in the source ZIP, but must never be pushed to the repo
+/single-v*.apk

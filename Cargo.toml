@@ -1,6 +1,6 @@
 [package]
 name = "p2p-bridge"
-version = "0.1.1"
+version = "0.1.3"
 edition = "2021"
 description = "LAN cross-platform control server: mDNS auto-discovery, WebSocket dashboard, peer-to-peer TCP handshake with chat and file transfer"
 license = "MIT"

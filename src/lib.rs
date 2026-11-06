@@ -15,6 +15,7 @@ pub mod config;
 pub mod files;
 pub mod mdns;
 pub mod p2p;
+pub mod persist;
 pub mod protocol;
 pub mod registry;
 pub mod server;

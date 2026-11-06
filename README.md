@@ -40,8 +40,8 @@ Requires Rust 1.75+ (stable).
 
 ```bash
 # 0 — or skip all of this: package the double-clickable Windows app
-#     build.bat      ->  Single\Single-v0.1.1.exe  +  Single-v0.1.1.zip
-#                        + Single\single-v0.1.1.apk for Android (the prebuilt
+#     build.bat      ->  Single\Single-v0.1.3.exe  +  Single-v0.1.3.zip
+#                        + Single\single-v0.1.3.apk for Android (the prebuilt
 #                        APK ships with the source — no SDK needed)
 
 # 1 — build both binaries
@@ -76,19 +76,22 @@ YouTube-style — with the chevron button, or the brand row itself: when
 expanded, the logo / “Single” text collapses it; when collapsed, the logo
 expands it again (the choice persists across reloads).
 
-**Phones get their own layout** (≤700 px — the APK's WebView and mobile
-browsers): the sidebar becomes a bottom tab bar with the five pages as tabs
-(icon + label), like a native app. The Android back button walks back through
-the pages you visited instead of closing the app, and the bar respects the
-gesture-navigation safe area.
+On phones (≤ 760 px) the layout switches to a native-app pattern: a **top app
+bar** (logo, name, green live dot) and a **bottom tab bar** for the five
+pages — no sidebar at all. Opening a conversation goes full-screen with a
+back button, exactly like a chat app; the tab bar slides away for room and
+comes back when you leave the chat.
 
 | page | what lives there |
 | --- | --- |
 | **Home** | LocalSend-style landing: big app logo, your device name (tap to rename in Settings), a **Find devices** button, and the **Protocol** switch |
 | **Devices** | *this device* identity card, the nearby-device grid (mDNS), platform filters, Connect |
-| **Chats** | conversation list + one conversation per device: bubbles, RTT badge, file transfers, collapsible handshake timeline |
+| **Chats** | WhatsApp-style conversation list + chat area: day dividers, doodle wallpaper, in/out bubbles with inline timestamps, file-transfer cards, sticky composer (attach / auto-growing input / round send), RTT badge, collapsible handshake timeline |
 | **Activity** | uptime/devices/sessions stats and the live server log with level filters |
 | **Settings** | device name (rename), dark/light/system theme, network info, firewall help, about |
+
+A themed **splash screen** (logo on a white/black background matching your
+OS theme) covers the launch and fades out as soon as the dashboard is live.
 
 ### Protocol — inbound connection policy
 
@@ -103,9 +106,26 @@ The Home page's Protocol switch (Public / Private / Protected, default
   password you set. A wrong/missing password is rejected with `reason:"auth"`,
   and the initiating dashboard pops a password dialog and retries.
 
-The choice is stored in the browser (localStorage) and re-applied to the
-server on every dashboard reconnect; the password itself lives in server
-memory only.
+The choice is persisted **server-side** in `single-state.json` (together with
+the password), so it survives server restarts and applies even while no
+dashboard is open. The browser keeps a render cache only.
+
+### Persistence — everything returns where you left it
+
+The server writes `single-state.json` next to the `received/` folder
+(atomic temp-file + rename, debounced writes) containing:
+
+- the device name chosen in the dashboard (`--name` is only the first-boot
+  default — a rename wins from then on),
+- the Protocol mode + password,
+- every conversation: chat lines, file-transfer cards, peer metadata —
+  restored as closed sessions you can **Reconnect** to with one tap,
+- the tail of the activity log, replayed into the Activity page on boot.
+
+The browser side remembers the last page, the open conversation, message
+drafts, theme and sidebar state, so a reload (or app restart) returns exactly
+where you left off. On phones the state file lives in the app's private
+storage.
 
 ### Demo walkthrough
 
@@ -179,7 +199,7 @@ address to type:
 
 ```
 Single/
-├── Single-v0.1.1.exe      the app — double-click it: the console is the
+├── Single-v0.1.3.exe      the app — double-click it: the console is the
 │                          server, and the dashboard opens automatically
 │                          as an Edge/Chrome --app window
 ├── Launch Single.bat      friendly starter
@@ -190,7 +210,7 @@ Single/
 └── tools/
     └── Device-Simulator.exe
 
-Single-v0.1.1.zip          the same folder, zipped for sharing
+Single-v0.1.3.zip          the same folder, zipped for sharing
 ```
 
 The version is read from `Cargo.toml` automatically — bump it there, re-run
@@ -199,9 +219,9 @@ the console to UTF-8, and once the HTTP listener is up it opens the dashboard
 in an app-style window (Edge → Chrome → default browser; disable with
 `--no-open`).
 
-### Packaging the Android app (single-v0.1.1.apk)
+### Packaging the Android app (single-v0.1.3.apk)
 
-A ready-made, debug-signed **`single-v0.1.1.apk` ships with the source
+A ready-made, debug-signed **`single-v0.1.3.apk` ships with the source
 project** (next to `build.bat`), and `build.bat` copies it into the `Single\`
 folder on every run — no Android SDK required to install it on a phone.
 
@@ -214,13 +234,22 @@ Windows build simply finishes without it):
    `x86_64-linux-android` (emulators) with the NDK linker,
 2. the binaries travel inside the APK as `jniLibs/<abi>/libsingle.so`,
 3. gradle packages `android/` (a ~200-line WebView + foreground-service
-   wrapper — see `android/README.md`) into `single-v0.1.1.apk` at the project
+   wrapper — see `android/README.md`) into `single-v0.1.3.apk` at the project
    root.
 
-Copy the APK to the phone (or `adb install single-v0.1.1.apk`), install, and
+Copy the APK to the phone (or `adb install single-v0.1.3.apk`), install, and
 the phone becomes a first-class peer: it runs the same server, shows the same
 dashboard, discovers and chats with the PCs on the same Wi-Fi. Files received
 by the phone land in `Android/data/app.single.bridge/files/received/`.
+
+**Updating an existing install** — every build of this project (the prebuilt
+APK, `build.bat`, or gradle) signs with the one stable key
+`android/single.keystore` that ships with the source, so a newer APK installs
+straight over an older one. Exception: a build made from a *different* key
+(e.g. an APK from before v0.1.3) must be uninstalled once — Android never
+swaps signatures in place. Note that the APK file itself is `.gitignored`
+(`single-v*.apk`): it ships inside the source zip, but is never pushed to
+the git repo.
 
 ## CLI reference
 

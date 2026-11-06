@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Day theme: white launch splash (bg + centered logo), dark status-bar
+         icons. Mirrors the dashboard light theme (#eef1f6). -->
+    <style name="Theme.Single" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@drawable/splash_bg</item>
+        <item name="android:statusBarColor">#EEF1F6</item>
+        <item name="android:navigationBarColor">#EEF1F6</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:colorPrimary">#0A84FF</item>
+        <item name="android:colorAccent">#0A84FF</item>
+    </style>
+</resources>

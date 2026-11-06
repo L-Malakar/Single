@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta name="theme-color" content="#0b0d10">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0d10">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#eef1f6">
 <title>Single</title>
 <script>
 /* Apply the saved theme before first paint (no flash). Default: follow the OS. */
@@ -19,9 +20,21 @@ try {
 </head>
 <body>
 
+<!-- ================= splash / loading screen =================
+     Shown the instant the page paints (pure CSS, themed white/black by the
+     system setting); app.js fades it out once the dashboard is ready. -->
+<div id="splash" aria-hidden="true">
+  <div class="splash-inner">
+    <img class="splash-logo" src="/logo.svg" alt="">
+    <div class="splash-name">Single</div>
+    <div class="splash-dots"><span></span><span></span><span></span></div>
+    <div class="splash-ver" id="splashVer"></div>
+  </div>
+</div>
+
 <div class="app">
 
-  <!-- ================= sidebar ================= -->
+  <!-- ================= sidebar (desktop) ================= -->
   <aside class="sidebar">
     <div class="side-brand">
       <button class="side-toggle" id="sideToggle" title="Collapse menu" aria-label="Collapse the sidebar">
@@ -59,9 +72,21 @@ try {
 
     <div class="side-foot">
       <div class="ws-pill"><span class="led off" id="wsLed"></span><span id="wsText">connecting…</span><span class="mono dim" id="wsRtt"></span></div>
-      <div class="side-ver dim" id="verTag">v0.1.1</div>
+      <div class="side-ver dim" id="verTag">v0.1.3</div>
     </div>
   </aside>
+
+  <!-- ================= mobile top bar (phones) =================
+       Logo + name on the left, live status on the right. -->
+  <header class="mobile-top" id="mobileTop">
+    <div class="mtop-brand">
+      <img class="mtop-logo" src="/logo.svg" alt="Single">
+      <span class="mtop-name">Single</span>
+    </div>
+    <div class="mtop-live" id="mtopLive">
+      <span class="mtop-dot" id="mLiveDot"></span><span id="mLiveText">starting…</span>
+    </div>
+  </header>
 
   <!-- ================= content ================= -->
   <main class="content">
@@ -274,6 +299,12 @@ try {
               <div class="dim small">Files sent to you are saved to the <span class="mono">received\</span> folder next to the app — every transfer is SHA-256 verified.</div>
             </div>
           </div>
+          <div class="set-row">
+            <div>
+              <div class="set-label">Saved state</div>
+              <div class="dim small">Your name, protocol choice, chats and file history are kept in <span class="mono">single-state.json</span> and restored on every start.</div>
+            </div>
+          </div>
         </section>
 
         <section class="card">
@@ -291,7 +322,7 @@ try {
           <h2>About</h2>
           <div class="set-row">
             <div>
-              <div class="set-label">Single <span class="mono dim" id="setVer">v0.1.1</span></div>
+              <div class="set-label">Single <span class="mono dim" id="setVer">v0.1.3</span></div>
               <div class="dim small">mDNS LAN control server · P2PBRIDGE/1 protocol · built from the p2p-bridge Rust project · MIT license.</div>
             </div>
           </div>
@@ -300,9 +331,38 @@ try {
       </div>
     </section>
   </main>
+
+  <!-- ================= mobile bottom tab bar (phones) =================
+       Lives INSIDE the app shell (after the content column), so on phones
+       it is a normal flex row: the page content ends above it and can
+       never be hidden underneath. On desktops it is display:none. -->
+  <nav class="tabbar" id="tabbar">
+    <button class="tab-item active" data-page="home">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10.8 12 4l8 6.8"/><path d="M6.2 9.5V20h11.6V9.5"/><path d="M10 20v-5.6h4V20"/></svg>
+      <span>Home</span>
+    </button>
+    <button class="tab-item" data-page="devices">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="12" rx="2"/><path d="M8 20.5h8"/><path d="M12 16.5v4"/></svg>
+      <span>Devices</span>
+    </button>
+    <button class="tab-item" data-page="chats">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 12a8.5 8.5 0 0 1-12.4 7.5L3.5 20.5l1-4.6A8.5 8.5 0 1 1 20.5 12z"/></svg>
+      <span>Chats</span>
+      <span class="tab-badge hidden" id="tabBadge">0</span>
+    </button>
+    <button class="tab-item" data-page="activity">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 12.5h4l2.5-6 4 12 2.5-6h4"/></svg>
+      <span>Activity</span>
+    </button>
+    <button class="tab-item" data-page="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14.2 3H9.8l-.4 2.7a7 7 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5a7 7 0 0 0 0 2.4l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2 1.2l.4 2.7h4.4l.4-2.7a7 7 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5c.06-.4.1-.8.1-1.2z"/></svg>
+      <span>Settings</span>
+    </button>
+  </nav>
 </div>
 
 <div id="reconnectBanner" class="reconnect-banner hidden">Connection lost — reconnecting…</div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
 
 <!-- Private mode: inbound handshake waiting for a decision -->
 <div class="modal-backdrop hidden" id="reqModal">

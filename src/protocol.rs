@@ -46,7 +46,7 @@ pub struct HandshakeStep {
 }
 
 /// Chat line in a P2P session.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ChatLine {
     /// `in` | `out` | `sys`
     pub dir: String,
@@ -55,7 +55,7 @@ pub struct ChatLine {
 }
 
 /// File transfer progress inside a session.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TransferDto {
     pub tid: String,
     /// `in` | `out`
@@ -127,6 +127,18 @@ pub enum ServerMsg {
     },
     #[serde(rename = "pong")]
     Pong,
+    /// Boot-time replay of the persisted activity-log tail (sent once per
+    /// dashboard connection, right after the initial sessions sync).
+    #[serde(rename = "logs")]
+    Logs { lines: Vec<PersistedLog> },
+}
+
+/// One line of the persisted activity log (see `crate::persist`).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PersistedLog {
+    pub level: String,
+    pub msg: String,
+    pub ts: i64,
 }
 
 /// Granular file-transfer event (progress bars in the chat panel).
