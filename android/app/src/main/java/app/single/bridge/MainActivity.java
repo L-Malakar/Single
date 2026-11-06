@@ -2,56 +2,49 @@ package app.single.bridge;
 
 import android.app.Activity;
 import android.content.Intent;
-import android.content.res.Configuration;
 import android.graphics.Color;
-import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
-import android.view.Gravity;
-import android.view.View;
-import android.view.ViewGroup;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
-import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.FrameLayout;
-import android.widget.ImageView;
-import android.widget.LinearLayout;
-import android.widget.TextView;
 
-import java.net.HttpURLConnection;
-import java.net.URL;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 
 /**
  * Minimal wrapper: starts {@link ServerService} (which spawns the Rust
  * server bundled as libsingle.so) and shows the dashboard at
  * http://127.0.0.1:3000 in a WebView. No AndroidX, no extra dependencies —
- * the whole UI is the same multi-page dashboard as on desktop (phones get
- * the app bar + bottom tab bar layout automatically).
+ * the whole UI is the same multi-page dashboard as on desktop.
  *
- * Robust startup (the old "web page not found after reopening" bug):
- * the dashboard is loaded only AFTER the embedded server actually answers
- * a probe on 127.0.0.1:3000, and any main-frame error re-triggers that
- * probe loop — the built-in WebView error page never stays on screen.
- * A native splash (logo + themed white/black background, following the
- * system dark mode) covers the wait.
+ * ── Why the WebView never shows "net::ERR_CONNECTION_REFUSED" anymore ──
+ * Older builds called loadUrl() immediately and retried on WebView errors.
+ * That raced the server boot, and the retry flag was disarmed by the error
+ * page's own onPageFinished — so a slow server boot left the app stuck on
+ * the connection-refused page forever (classic "works on first launch,
+ * broken after reopening").
+ *
+ * Now the flow is:
+ *   1. show an inline "starting…" splash (no network involved),
+ *   2. a background thread TCP-probes 127.0.0.1:3000 until the server
+ *      actually accepts connections,
+ *   3. only then is the dashboard loaded — and if the server ever dies
+ *      mid-session, the main-frame error handler swaps back to the splash
+ *      and re-enters the probe loop. The Chromium error page is never the
+ *      final state the user sees.
  */
 public class MainActivity extends Activity {
 
     private static final String DASH_URL = "http://127.0.0.1:3000";
+    private static final String DASH_HOST = "127.0.0.1";
+    private static final int DASH_PORT = 3000;
 
     private WebView web;
-    private FrameLayout root;
-    private LinearLayout splashView;
-    private TextView splashStatus;
     private final Handler ui = new Handler();
-
-    /** a poll-and-load cycle is already running (one at a time) */
-    private volatile boolean polling = false;
-    /** the current/last navigation ended on the built-in error page */
-    private volatile boolean navFailed = false;
-    /** activity is gone for good (not just recreated for a config change) */
+    private volatile boolean probing = false;
     private volatile boolean gone = false;
 
     @Override
@@ -65,227 +58,63 @@ public class MainActivity extends Activity {
         }
 
         web = new WebView(this);
-        WebSettings s = web.getSettings();
-        s.setJavaScriptEnabled(true);
-        s.setDomStorageEnabled(true);        // theme + layout + drafts survive restarts
-        s.setUseWideViewPort(true);          // fit the responsive dashboard exactly
-        s.setLoadWithOverviewMode(true);     // to the screen width (pinch-zoom still works)
-        web.setBackgroundColor(themeBackground());
+        web.setBackgroundColor(Color.parseColor("#0b0d10"));
+        web.getSettings().setJavaScriptEnabled(true);
+        web.getSettings().setDomStorageEnabled(true); // theme + sidebar preferences
+        setContentView(web);
 
-        web.setWebViewClient(new WebViewClient() {
+        web.setWebViewClient(new DashWebClient(this));
 
-            @Override
-            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-                // a fresh navigation is under way — arm the error detection
-                if (url != null && url.startsWith("http://127.0.0.1")) navFailed = false;
-            }
-
-            @SuppressWarnings("deprecation")
-            @Override
-            public void onReceivedError(WebView view, int code, String desc, String url) {
-                // legacy variant (still called on every WebView level) —
-                // react only to a failure of the page itself, not sub-resources
-                if (url != null && url.startsWith("http://127.0.0.1")) handleLoadFailure();
-            }
-
-            @Override
-            public void onReceivedError(WebView view, WebResourceRequest req,
-                                        android.webkit.WebResourceError err) {
-                if (req.isForMainFrame()
-                        && req.getUrl().toString().startsWith("http://127.0.0.1")) {
-                    handleLoadFailure();
-                }
-            }
-
-            @Override
-            public void onPageFinished(WebView view, String url) {
-                // IMPORTANT: the built-in "web page not found" page ALSO fires
-                // onPageFinished. Treating that as success was the bug that
-                // froze the app on the error screen after a reopen.
-                if (url == null || !url.startsWith("http://127.0.0.1")) return;
-                if (navFailed) {
-                    handleLoadFailure();
-                } else {
-                    hideSplash();
-                }
-            }
-        });
-
-        root = new FrameLayout(this);
-        root.addView(web, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        buildSplash();
-        root.addView(splashView, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        setContentView(root);
-
-        // The foreground service owns the server process (and the mDNS lock).
+        // Foreground service owns the server process (and the mDNS lock).
         startService(new Intent(this, ServerService.class));
 
-        loadWhenServerReady();
-    }
-
-    private void handleLoadFailure() {
-        navFailed = true;
-        showSplash("restarting the server…");
-        loadWhenServerReady();
+        showSplash("Starting the server…");
+        startProbing();
     }
 
     /**
-     * Poll the local server on a worker thread; only once it actually answers
-     * do we point the WebView at it. Kills the classic race where the WebView
-     * loads faster than the server binds its port (first launch AND every
-     * reopen after the service was stopped).
+     * WebView callbacks. Named (not anonymous) inner class on purpose:
+     * the d8 dexer shipped in build-tools 34 crashes on anonymous-class
+     * bytecode emitted by modern JDK javacs.
      */
-    private void loadWhenServerReady() {
-        if (polling || gone || isFinishing()) return;
-        polling = true;
-        Thread t = new Thread(() -> {
-            long delay = 200;
-            while (!gone && !isFinishing()) {
-                if (serverResponds()) {
-                    ui.post(() -> {
-                        if (!gone && !isFinishing()) web.loadUrl(DASH_URL);
-                    });
-                    polling = false;
-                    return;
-                }
-                try { Thread.sleep(delay); } catch (InterruptedException e) { break; }
-                delay = Math.min(delay + 150, 1500);
-            }
-            polling = false;
-        }, "single-dash-wait");
-        t.setDaemon(true);
-        t.start();
-    }
+    private static class DashWebClient extends WebViewClient {
 
-    /** Any HTTP answer (even 404) proves the server is up and accepting. */
-    private boolean serverResponds() {
-        HttpURLConnection c = null;
-        try {
-            c = (HttpURLConnection) new URL(DASH_URL + "/api/health").openConnection();
-            c.setConnectTimeout(400);
-            c.setReadTimeout(400);
-            c.setRequestMethod("GET");
-            int code = c.getResponseCode();
-            return code >= 200 && code < 500;
-        } catch (Exception e) {
-            return false;
-        } finally {
-            if (c != null) c.disconnect();
+        private final MainActivity host;
+
+        DashWebClient(MainActivity host) {
+            this.host = host;
+        }
+
+        /** Modern main/sub-frame errors (API 23+, minSdk 24). */
+        @Override
+        public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError err) {
+            if (req.isForMainFrame()) host.serverVanished();
+        }
+
+        /** Legacy main-frame errors — kept for older WebViews. */
+        @SuppressWarnings("deprecation")
+        @Override
+        public void onReceivedError(WebView view, int code, String desc, String url) {
+            if (url != null && url.startsWith("http")) host.serverVanished();
+        }
+
+        @Override
+        public void onPageFinished(WebView view, String url) {
+            // The dashboard really rendered: drop the splash/error page
+            // from the back history so Back exits the app instead of
+            // surfacing "starting…" again.
+            if (url != null && url.startsWith(DASH_URL)) view.clearHistory();
         }
     }
-
-    /* ------------------------------------------------------------- splash */
-
-    private void buildSplash() {
-        splashView = new LinearLayout(this);
-        splashView.setOrientation(LinearLayout.VERTICAL);
-        splashView.setGravity(Gravity.CENTER);
-        splashView.setBackgroundColor(themeBackground());
-
-        ImageView logo = new ImageView(this);
-        logo.setImageResource(R.mipmap.ic_launcher);
-        splashView.addView(logo, new LinearLayout.LayoutParams(dp(104), dp(104)));
-
-        TextView name = new TextView(this);
-        name.setText("Single");
-        name.setTextSize(26);
-        name.setTypeface(Typeface.DEFAULT_BOLD);
-        name.setTextColor(themeText());
-        name.setPadding(0, dp(16), 0, 0);
-        splashView.addView(name);
-
-        splashStatus = new TextView(this);
-        splashStatus.setText("starting the server…");
-        splashStatus.setTextSize(13.5f);
-        splashStatus.setTextColor(themeSub());
-        splashStatus.setPadding(0, dp(8), 0, 0);
-        splashView.addView(splashStatus);
-    }
-
-    private void showSplash(String status) {
-        if (gone || splashView == null) return;
-        if (splashStatus != null) splashStatus.setText(status);
-        if (splashView.getParent() == null) {
-            splashView.setAlpha(1f);
-            root.addView(splashView, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        }
-    }
-
-    private void hideSplash() {
-        if (splashView == null || splashView.getParent() == null) return;
-        final View s = splashView;
-        s.animate().alpha(0f).setDuration(280).withEndAction(() -> {
-            if (s.getParent() != null) root.removeView(s);
-        }).start();
-    }
-
-    /* ------------------------------------------------------------- theme */
-
-    /** Match the splash/HTML background so the launch never flashes white. */
-    private int themeBackground() {
-        return Color.parseColor(isNight() ? "#0b0d10" : "#eef1f6");
-    }
-
-    private int themeText() {
-        return Color.parseColor(isNight() ? "#f0f3f7" : "#171b21");
-    }
-
-    private int themeSub() {
-        return Color.parseColor(isNight() ? "#9aa3b2" : "#5a6572");
-    }
-
-    private boolean isNight() {
-        int night = getResources().getConfiguration().uiMode
-                & Configuration.UI_MODE_NIGHT_MASK;
-        return night == Configuration.UI_MODE_NIGHT_YES;
-    }
-
-    /** Keep the system bars in sync when the system theme flips at runtime. */
-    private void applySystemBars() {
-        int bg = themeBackground();
-        getWindow().setStatusBarColor(bg);
-        getWindow().setNavigationBarColor(bg);
-        if (Build.VERSION.SDK_INT >= 23) {
-            View deco = getWindow().getDecorView();
-            int vis = deco.getSystemUiVisibility();
-            if (isNight()) vis &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
-            else vis |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
-            if (Build.VERSION.SDK_INT >= 26) {
-                if (isNight()) vis &= ~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
-                else vis |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
-            }
-            deco.setSystemUiVisibility(vis);
-        }
-    }
-
-    private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
-    }
-
-    /* -------------------------------------------------------- lifecycle */
 
     @Override
     protected void onStart() {
         super.onStart();
-        // Process was killed in the background and restored: make sure the
-        // dashboard is (re)loaded. No-op when already showing.
-        if (web.getUrl() == null) loadWhenServerReady();
-    }
-
-    @Override
-    public void onConfigurationChanged(Configuration newConfig) {
-        super.onConfigurationChanged(newConfig);
-        // uiMode is declared in android:configChanges, so the activity is NOT
-        // recreated when the system dark mode flips — recolor instead (the
-        // page itself follows prefers-color-scheme live).
-        applySystemBars();
-        web.setBackgroundColor(themeBackground());
-        if (splashView != null && splashView.getParent() != null) {
-            splashView.setBackgroundColor(themeBackground());
-        }
+        // Coming back after the OS freed memory: if the page died while we
+        // were away, go through the probe loop again (it loads instantly
+        // when the server is still alive).
+        String cur = web.getUrl();
+        if (cur == null || !cur.startsWith(DASH_URL)) startProbing();
     }
 
     @Override
@@ -297,11 +126,92 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         gone = true;
-        // Stop the server only when the activity is truly finished (back
-        // press, swipe-away). A configuration-change recreation has
-        // isFinishing() == false and must keep the service alive — killing
-        // it there was another path to the "page not found" state.
+        // Explicit close (Back press out of the app): stop the server — the
+        // service kills the process cleanly and releases the multicast lock.
+        // System-initiated destroys (memory pressure while backgrounded)
+        // leave the server running so transfers survive.
         if (isFinishing()) stopService(new Intent(this, ServerService.class));
         super.onDestroy();
+    }
+
+    // ------------------------------------------------------------- recovery
+
+    /** Main frame failed to load → the server is (temporarily) gone. */
+    private void serverVanished() {
+        ui.post(() -> {
+            if (gone) return;
+            showSplash("Waiting for the server…");
+            startProbing();
+        });
+    }
+
+    /**
+     * Polls 127.0.0.1:3000 on a worker thread (250 ms → 1 s backoff) and
+     * loads the dashboard on the UI thread as soon as it answers. Exactly
+     * one loop runs at any time.
+     */
+    private void startProbing() {
+        if (probing || gone) return;
+        probing = true;
+        Thread t = new Thread(() -> {
+            long delay = 250;
+            while (!gone) {
+                if (portOpen()) {
+                    ui.post(() -> { if (!gone) web.loadUrl(DASH_URL); });
+                    break;
+                }
+                try { Thread.sleep(delay); } catch (InterruptedException e) { break; }
+                delay = Math.min(delay + 150, 1000);
+            }
+            probing = false;
+        }, "single-port-probe");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static boolean portOpen() {
+        try (Socket s = new Socket()) {
+            s.connect(new InetSocketAddress(DASH_HOST, DASH_PORT), 400);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // -------------------------------------------------------------- splash
+
+    /**
+     * Inline, network-free splash/status page (also the "reconnecting…"
+     * screen). Kept in sync with the dashboard's dark theme; the spinner
+     * is a pure CSS ring. Loaded with a null base URL so it can never
+     * trigger the main-frame error handler.
+     */
+    private void showSplash(String message) {
+        String html =
+            "<!doctype html><html><head><meta charset='utf-8'>" +
+            "<meta name='viewport' content='width=device-width, initial-scale=1, viewport-fit=cover'>" +
+            "<style>" +
+            "html,body{height:100%;margin:0}" +
+            "body{display:grid;place-items:center;background:#0b0d10;color:#9aa3b2;" +
+            "font:14px -apple-system,'Segoe UI',Roboto,sans-serif;text-align:center}" +
+            ".wrap{display:flex;flex-direction:column;align-items:center;gap:16px;" +
+            "padding:0 24px calc(0px)}" +
+            ".logo{width:52px;height:52px;border-radius:14px;background:linear-gradient(135deg,#0a84ff,#409cff);" +
+            "display:grid;place-items:center;box-shadow:0 10px 30px rgba(10,132,255,.35)}" +
+            ".logo svg{width:30px;height:30px}" +
+            ".name{color:#f0f3f7;font-size:19px;font-weight:700;letter-spacing:-.3px;margin-top:2px}" +
+            ".ring{width:22px;height:22px;border-radius:50%;border:2.5px solid rgba(255,255,255,.14);" +
+            "border-top-color:#0a84ff;animation:spin .9s linear infinite}" +
+            "@keyframes spin{to{transform:rotate(360deg)}}" +
+            ".msg{font-size:13px}" +
+            "</style></head><body><div class='wrap'>" +
+            "<div class='logo'><svg viewBox='0 0 24 24' fill='none' stroke='#fff' stroke-width='1.9' " +
+            "stroke-linecap='round' stroke-linejoin='round'><path d='M4 10.8 12 4l8 6.8'/>" +
+            "<path d='M6.2 9.5V20h11.6V9.5'/></svg></div>" +
+            "<div class='name'>Single</div>" +
+            "<div class='ring'></div>" +
+            "<div class='msg'>" + message + "</div>" +
+            "</div></body></html>";
+        web.loadDataWithBaseURL(null, html, "text/html", "utf-8", null);
     }
 }

@@ -10,7 +10,6 @@ use crate::access::AccessControl;
 use crate::config::{Config, SERVICE_TYPE};
 use crate::mdns::Mdns;
 use crate::p2p::P2pManager;
-use crate::persist::Persist;
 use crate::protocol::*;
 use crate::registry::Registry;
 use crate::util::{log_bus, now_ms};
@@ -42,14 +41,18 @@ pub struct AppState {
     pub self_identity: Arc<RwLock<Identity>>,
     pub p2p: Arc<P2pManager>,
     pub access: Arc<AccessControl>,
-    pub persist: Arc<Persist>,
     pub started: std::time::Instant,
 }
 
 pub async fn serve(state: Arc<AppState>) -> std::io::Result<()> {
     let app = build_router(state.clone());
     let addr = format!("0.0.0.0:{}", state.cfg.http_port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    // The port can still be in the previous instance's hands for a moment
+    // when the app is closed and quickly reopened (Android wrapper: old
+    // process mid-teardown). Retry briefly instead of dying with
+    // "address already in use" — that race left nothing listening and the
+    // dashboard stuck on ERR_CONNECTION_REFUSED.
+    let listener = bind_with_retry(&addr, 20, 500, &state.bus).await?;
     log_bus(
         &state.bus,
         "ok",
@@ -58,6 +61,34 @@ pub async fn serve(state: Arc<AppState>) -> std::io::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
+}
+
+/// Try to bind `addr`, retrying with `pause_ms` between attempts up to
+/// `attempts` times. Logs every failure to the activity bus so the
+/// dashboard explains what is happening instead of looking hung.
+async fn bind_with_retry(
+    addr: &str,
+    attempts: u32,
+    pause_ms: u64,
+    bus: &broadcast::Sender<ServerMsg>,
+) -> std::io::Result<tokio::net::TcpListener> {
+    let mut last = None;
+    for attempt in 1..=attempts {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => {
+                if attempt > 1 {
+                    log_bus(bus, "ok", format!("port {addr} bound after {attempt} attempts"));
+                }
+                return Ok(l);
+            }
+            Err(e) => {
+                log_bus(bus, "warn", format!("bind {addr} failed ({e}) — retrying"));
+                last = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(pause_ms)).await;
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("bind failed")))
 }
 
 fn build_router(state: Arc<AppState>) -> Router {
@@ -92,22 +123,21 @@ fn build_router(state: Arc<AppState>) -> Router {
 }
 
 async fn shutdown_signal() {
-    // Ctrl-C everywhere; SIGTERM too (that is what Android's service
-    // manager and most supervisors send) so the mDNS goodbye + state
-    // flush actually happen on phones.
+    // Android's Process.destroy() sends SIGTERM (not SIGINT) — without the
+    // terminate() handler the old builds never shut down gracefully there.
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = term.recv() => {}
-                }
-            }
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(t) => t,
             Err(_) => {
                 let _ = tokio::signal::ctrl_c().await;
+                return;
             }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = term.recv() => {},
         }
     }
     #[cfg(not(unix))]
@@ -201,32 +231,8 @@ async fn ws_session(socket: WebSocket, st: Arc<AppState>) {
             .send(Message::Text(serde_json::to_string(&ServerMsg::Session { session }).unwrap().into()))
             .await;
     }
-    // Replay the persisted activity-log tail so the Activity page picks up
-    // where the last session left off (live lines follow as Log events).
-    {
-        let store = st.persist.snapshot();
-        if !store.logs.is_empty() {
-            let _ = tx
-                .send(Message::Text(
-                    serde_json::to_string(&ServerMsg::Logs {
-                        lines: store
-                            .logs
-                            .iter()
-                            .map(|l| PersistedLog {
-                                level: l.level.clone(),
-                                msg: l.msg.clone(),
-                                ts: l.ts,
-                            })
-                            .collect(),
-                    })
-                    .unwrap()
-                    .into(),
-                ))
-                .await;
-        }
-    }
-    // Inbound connection policy (Home › Protocol) — persisted server-side,
-    // so this snapshot is authoritative and applies with no dashboard open.
+    // Inbound connection policy (Home › Protocol) — the browser mirrors it
+    // into localStorage and re-applies it on every reconnect.
     let _ = tx
         .send(Message::Text(serde_json::to_string(&st.access.snapshot()).unwrap().into()))
         .await;
@@ -309,8 +315,6 @@ async fn handle_client(st: &Arc<AppState>, msg: ClientMsg, tx: &mut SplitSink<We
                 server_time: now_ms(),
             };
             let _ = st.bus.send(hello);
-            // The chosen name survives restarts (persisted state file).
-            st.persist.set_name(&name);
             log_bus(
                 &st.bus,
                 "ok",

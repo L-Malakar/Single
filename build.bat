@@ -20,7 +20,6 @@ rem    5. puts the Android app next to the folder:
 rem         single-v0.1.3.apk  install on a phone and test for real
 rem       The prebuilt APK that ships with the source zip is used as-is;
 rem       when it is missing, a fresh one is built from source.
-rem       NOTE: the APK is .gitignored - git never pushes the binary itself.
 rem
 rem  REQUIREMENTS
 rem    Rust installed on Windows  -  https://rustup.rs  (rustup default stable)
@@ -276,9 +275,8 @@ if errorlevel 1 goto :apk_failed
 
 if not exist "android\app\src\main\jniLibs\arm64-v8a" mkdir "android\app\src\main\jniLibs\arm64-v8a"
 if not exist "android\app\src\main\jniLibs\x86_64"   mkdir "android\app\src\main\jniLibs\x86_64"
-rem NOTE: android cross-builds have NO .exe extension, even on Windows.
-copy /y "target\aarch64-linux-android\release\%SERVER_BIN%" "android\app\src\main\jniLibs\arm64-v8a\libsingle.so" >nul
-copy /y "target\x86_64-linux-android\release\%SERVER_BIN%"   "android\app\src\main\jniLibs\x86_64\libsingle.so" >nul
+copy /y "target\aarch64-linux-android\release\%SERVER_BIN%.exe" "android\app\src\main\jniLibs\arm64-v8a\libsingle.so" >nul
+copy /y "target\x86_64-linux-android\release\%SERVER_BIN%.exe"  "android\app\src\main\jniLibs\x86_64\libsingle.so" >nul
 if not exist "android\app\src\main\jniLibs\arm64-v8a\libsingle.so" goto :apk_failed
 
 rem -- 5. run gradle to package the APK -----------------------------------------
