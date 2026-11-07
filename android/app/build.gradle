@@ -10,7 +10,7 @@ android {
         applicationId "app.single.bridge"
         minSdk 24        // Android 7.0
         targetSdk 34     // Android 14
-        versionCode 13
+        versionCode 1
         // kept in sync by build.bat from Cargo.toml
         versionName project.findProperty('singleVersion') ?: '0.1.3'
     }
@@ -25,29 +25,15 @@ android {
     }
 
     signingConfigs {
-        // Stable project keystore (android/single.keystore) — every build
-        // is signed with the SAME key, so a new APK installs right over the
-        // previous one. Never delete or regenerate the keystore: Android
-        // refuses cross-signature updates.
-        //   keytool -genkeypair -keystore single.keystore -alias single \
-        //     -keyalg RSA -keysize 2048 -validity 10950 \
-        //     -storepass single-app -keypass single-app \
-        //     -dname "CN=Single, OU=Single, O=Single, C=IN"
-        single {
-            storeFile file("../single.keystore")
-            storePassword "single-app"
-            keyAlias "single"
-            keyPassword "single-app"
-        }
+        // Debug-keystore signing is automatic for assembleDebug.
     }
 
     buildTypes {
-        debug {
-            signingConfig signingConfigs.single
-        }
         release {
             minifyEnabled false
-            signingConfig signingConfigs.single
+            // For a self-signed release build run:
+            //   gradle -p android assembleRelease
+            // after adding a signingConfig here (or use assembleDebug).
         }
     }
 

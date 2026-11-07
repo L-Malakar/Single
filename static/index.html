@@ -2,7 +2,7 @@
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
 <meta name="theme-color" content="#0b0d10">
 <title>Single</title>
@@ -18,13 +18,6 @@ try {
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-
-<!-- Mobile top bar (≤980 px): brand + live dot; hidden on desktop -->
-<header class="m-top" id="mTop">
-  <img class="m-logo" src="/logo.svg" alt="Single">
-  <span class="m-title">Single</span>
-  <span class="m-live" id="mLive"><span class="led off" id="mLed"></span><span id="mWsText">connecting…</span></span>
-</header>
 
 <div class="app">
 
@@ -53,6 +46,10 @@ try {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 12a8.5 8.5 0 0 1-12.4 7.5L3.5 20.5l1-4.6A8.5 8.5 0 1 1 20.5 12z"/></svg>
         <span class="nav-label">Chats</span>
         <span class="nav-badge hidden" id="navBadge">0</span>
+      </button>
+      <button class="nav-item" data-page="files" title="Files">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7V5.5A1.5 1.5 0 0 1 5 4h4l2 2.5h8A1.5 1.5 0 0 1 20.5 8V9"/><path d="M3.5 7a1.5 1.5 0 0 0-1.5 1.5l1.8 8.6A1.5 1.5 0 0 0 5.3 18.5h13.9a1.5 1.5 0 0 0 1.5-1.2l1.8-8.6A1.5 1.5 0 0 0 21 7H3.5z"/></svg>
+        <span class="nav-label">Files</span>
       </button>
       <button class="nav-item" data-page="activity" title="Activity">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 12.5h4l2.5-6 4 12 2.5-6h4"/></svg>
@@ -186,6 +183,60 @@ try {
       </div>
     </section>
 
+    <!-- ========== page: files ========== -->
+    <section class="page" id="page-files">
+      <header class="page-head">
+        <div>
+          <h1>Files</h1>
+          <p class="sub">encrypted bridge · AES-256-GCM end to end · sandboxed shares</p>
+        </div>
+      </header>
+
+      <section class="card files-share-card">
+        <h2>Sharing</h2>
+        <p class="dim small">Folders this device offers to connected devices. Peers browse them through the
+        E2EE-encrypted P2P session — paths are sandboxed, nothing outside a share is ever reachable.</p>
+        <div class="share-list" id="shareList"></div>
+        <div class="share-add">
+          <input type="text" id="sharePath" class="mono" placeholder="absolute path on this device — e.g. C:\Users\me\Photos or /storage/emulated/0/Pictures" maxlength="180" spellcheck="false">
+          <button class="btn" id="shareAdd">Add folder</button>
+        </div>
+        <p class="dim small" id="shareHint">The folder must already exist — its name becomes the title peers see.</p>
+      </section>
+
+      <section class="card">
+        <h2>Connected devices</h2>
+        <p class="dim small" id="drivesHint">Connect to a device from the Devices page, then browse its shares here.</p>
+        <div class="bridge-peers" id="bridgePeers"></div>
+      </section>
+
+      <section class="card files-browser hidden" id="filesBrowser">
+        <div class="fs-head">
+          <span class="dev-icon" id="fsIcon"></span>
+          <div class="grow">
+            <div class="fs-title" id="fsTitle">…</div>
+            <div class="fs-crumb" id="fsCrumb"></div>
+          </div>
+          <span class="enc-badge hidden" id="fsEnc" title="Every frame on this channel is sealed with AES-256-GCM after the X25519 key exchange">E2EE</span>
+          <button class="btn small ghost" id="fsRefresh">Refresh</button>
+          <button class="btn small ghost" id="fsMkdirBtn">New folder</button>
+          <button class="btn small" id="fsUpload">Upload</button>
+        </div>
+        <div class="fs-mkdir hidden" id="fsMkdirRow">
+          <input type="text" id="fsMkdirName" class="mono" placeholder="folder name…" maxlength="60" spellcheck="false">
+          <button class="btn small" id="fsMkdirGo">Create</button>
+          <button class="btn small ghost" id="fsMkdirCancel">Cancel</button>
+        </div>
+        <div class="fs-status dim" id="fsStatus"></div>
+        <div class="fs-list" id="fsList"></div>
+      </section>
+
+      <div class="notice hidden" id="fsLoopback">
+        <b>Local only.</b> The files bridge is reachable from this device itself — open the dashboard
+        <b>on the device</b> whose peers you want to browse (the app window the server opens is always local).
+      </div>
+    </section>
+
     <!-- ========== page: activity ========== -->
     <section class="page" id="page-activity">
       <header class="page-head">
@@ -278,7 +329,7 @@ try {
           <div class="set-row">
             <div>
               <div class="set-label">Received files</div>
-              <div class="dim small">Files sent to you are saved to the <span class="mono">received\</span> folder next to the app — every transfer is SHA-256 verified.</div>
+              <div class="dim small">Files sent to you are saved to the <span class="mono">received\</span> folder next to the app — every transfer is SHA-256 verified. Folders you share with others are managed on the <b>Files</b> page.</div>
             </div>
           </div>
         </section>
@@ -299,7 +350,7 @@ try {
           <div class="set-row">
             <div>
               <div class="set-label">Single <span class="mono dim" id="setVer">v0.1.3</span></div>
-              <div class="dim small">mDNS LAN control server · P2PBRIDGE/1 protocol · built from the p2p-bridge Rust project · MIT license.</div>
+              <div class="dim small">mDNS LAN control server · P2PBRIDGE/1 protocol · E2EE bridge · built from the p2p-bridge Rust project · MIT license.</div>
             </div>
           </div>
         </section>
@@ -308,31 +359,6 @@ try {
     </section>
   </main>
 </div>
-
-<!-- Mobile bottom tab bar (≤980 px) — same five pages as the sidebar -->
-<nav class="m-bar" id="mBar">
-  <button class="m-tab active" data-page="home" title="Home">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10.8 12 4l8 6.8"/><path d="M6.2 9.5V20h11.6V9.5"/><path d="M10 20v-5.6h4V20"/></svg>
-    <span>Home</span>
-  </button>
-  <button class="m-tab" data-page="devices" title="Devices">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="12" rx="2"/><path d="M8 20.5h8"/><path d="M12 16.5v4"/></svg>
-    <span>Devices</span>
-  </button>
-  <button class="m-tab" data-page="chats" title="Chats">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 12a8.5 8.5 0 0 1-12.4 7.5L3.5 20.5l1-4.6A8.5 8.5 0 1 1 20.5 12z"/></svg>
-    <span>Chats</span>
-    <span class="m-badge hidden" id="mBadge">0</span>
-  </button>
-  <button class="m-tab" data-page="activity" title="Activity">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 12.5h4l2.5-6 4 12 2.5-6h4"/></svg>
-    <span>Activity</span>
-  </button>
-  <button class="m-tab" data-page="settings" title="Settings">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14.2 3H9.8l-.4 2.7a7 7 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5a7 7 0 0 0 0 2.4l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2 1.2l.4 2.7h4.4l.4-2.7a7 7 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5c.06-.4.1-.8.1-1.2z"/></svg>
-    <span>Settings</span>
-  </button>
-</nav>
 
 <div id="reconnectBanner" class="reconnect-banner hidden">Connection lost — reconnecting…</div>
 
@@ -370,6 +396,7 @@ try {
 </div>
 
 <input type="file" id="filePicker" class="hidden">
+<input type="file" id="filesPicker" class="hidden">
 <script src="/app.js"></script>
 </body>
 </html>

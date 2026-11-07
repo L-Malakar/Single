@@ -14,8 +14,9 @@
 
 use base64::Engine;
 use p2p_bridge::config::{MAGIC, PROTO_VER, SERVICE_TYPE};
+use p2p_bridge::crypto::{self, SessionKeys};
 use p2p_bridge::files;
-use p2p_bridge::protocol::Wire;
+use p2p_bridge::protocol::{FsEntryDto, Wire};
 use p2p_bridge::util::{human_bytes, nonce, now_ms};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use std::collections::HashMap;
@@ -262,12 +263,15 @@ async fn serve_device(dev: SimDevice, port: u16, received_dir: PathBuf) {
             return;
         }
     };
+    let share_root = seed_demo_share(&dev, &received_dir);
+    log(&format!("{} demo share: {}", dev.name, share_root.display()));
     loop {
         if let Ok((sock, addr)) = listener.accept().await {
             let dev = dev.clone();
             let dir = received_dir.clone();
+            let share = share_root.clone();
             tokio::spawn(async move {
-                if let Err(e) = respond(sock, addr, &dev, &dir).await {
+                if let Err(e) = respond(sock, addr, &dev, &dir, &share).await {
                     if e.kind() != ErrorKind::UnexpectedEof {
                         log(&format!("{} session ended: {e}", dev.name));
                     }
@@ -277,12 +281,16 @@ async fn serve_device(dev: SimDevice, port: u16, received_dir: PathBuf) {
     }
 }
 
-/// Full P2P responder: handshake → chat / ping / file transfer.
+/// Full P2P responder: handshake (with E2EE) → chat / ping / file transfer
+/// + a small demo file share so the encrypted bridge can be exercised
+/// against fake devices too (they appear as drives / in the Files app just
+/// like real ones).
 async fn respond(
     sock: TcpStream,
     addr: std::net::SocketAddr,
     dev: &SimDevice,
     received_dir: &PathBuf,
+    share_root: &PathBuf,
 ) -> std::io::Result<()> {
     let (rd, mut wr) = sock.into_split();
     let mut lines = BufReader::new(rd).lines();
@@ -292,54 +300,48 @@ async fn respond(
         Some(l) => l,
         None => return Ok(()),
     };
-    let hello = if first.starts_with("{\"type\":\"hello\"") {
-        first
+    let (peer_nonce, peer_name, peer_e2ee) = if first.starts_with("{\"type\":\"hello\"") {
+        match serde_json::from_str::<Wire>(&first) {
+            Ok(Wire::Hello { magic, ver, nonce, name, e2ee, .. })
+                if magic == MAGIC && ver == PROTO_VER =>
+            {
+                (nonce, name, e2ee)
+            }
+            _ => {
+                let _ = wr
+                    .write_all(b"{\"type\":\"err\",\"msg\":\"bad hello\"}\n")
+                    .await;
+                return Ok(());
+            }
+        }
     } else {
         let _ = wr
             .write_all(b"{\"type\":\"err\",\"msg\":\"expected hello\"}\n")
             .await;
         return Ok(());
     };
-    let hello: Wire = match serde_json::from_str(&hello) {
-        Ok(Wire::Hello { magic, ver, nonce, name, .. }) if magic == MAGIC && ver == PROTO_VER => {
-            Wire::Hello {
-                magic,
-                ver,
-                nonce,
-                name,
-                id: String::new(),
-                platform: String::new(),
-                password: String::new(),
-            }
-        }
-        _ => {
-            let _ = wr
-                .write_all(b"{\"type\":\"err\",\"msg\":\"bad hello\"}\n")
-                .await;
-            return Ok(());
-        }
-    };
-    let Wire::Hello { nonce: peer_nonce, name: peer_name, .. } = hello else { return Ok(()) };
 
-    // HELLO_ACK (SYN-ACK)
+    // HELLO_ACK (SYN-ACK) — with our ephemeral X25519 key for E2EE.
     let my_nonce = nonce();
-    let ack_json = serde_json::json!({
-        "type": "hello-ack",
-        "ok": true,
-        "id": format!("{}.{}", dev.name, SERVICE_TYPE),
-        "name": dev.name,
-        "platform": dev.platform,
-        "echo_nonce": peer_nonce,
-        "nonce": my_nonce,
-    });
-    wr.write_all(format!("{ack_json}\n").as_bytes()).await?;
+    let e2ee_key = crypto::EphemeralKey::generate();
+    let ack = Wire::HelloAck {
+        ok: true,
+        id: format!("{}.{}", dev.name, SERVICE_TYPE),
+        name: dev.name.to_string(),
+        platform: dev.platform.to_string(),
+        echo_nonce: peer_nonce.clone(),
+        nonce: my_nonce.clone(),
+        reason: String::new(),
+        e2ee: Some(e2ee_key.public_b64()),
+    };
+    write_line(&mut wr, &ack, None).await?;
 
     // ACK
-    let ack = match tokio::time::timeout(Duration::from_secs(5), lines.next_line()).await {
+    let ack_line = match tokio::time::timeout(Duration::from_secs(5), lines.next_line()).await {
         Ok(Ok(Some(l))) => l,
         _ => return Ok(()),
     };
-    let ack: Wire = match serde_json::from_str(&ack) {
+    let ack: Wire = match serde_json::from_str(&ack_line) {
         Ok(w) => w,
         Err(_) => return Ok(()),
     };
@@ -350,7 +352,18 @@ async fn respond(
             return Ok(());
         }
     }
-    log(&format!("🤝 {} ⇄ {peer_name} established ({addr})", dev.name));
+
+    // E2EE keys — identical schedule to the real server.
+    let keys: Option<SessionKeys> = peer_e2ee
+        .as_deref()
+        .and_then(|pub_b64| {
+            crypto::derive_keys(&e2ee_key, pub_b64, &peer_nonce, &my_nonce, false).ok()
+        });
+    log(&format!(
+        "🤝 {} ⇄ {peer_name} established ({addr}){}",
+        dev.name,
+        if keys.is_some() { " · 🔒 E2EE" } else { "" }
+    ));
 
     // Session loop
     let mut inbound: Option<files::InboundTransfer> = None;
@@ -361,9 +374,9 @@ async fn respond(
             Ok(None) => return Ok(()),
             Err(e) => return Err(e),
         };
-        let wire: Wire = match serde_json::from_str(&line) {
-            Ok(w) => w,
-            Err(_) => continue,
+        let wire = match parse_line(&line, keys.as_ref()) {
+            Some(w) => w,
+            None => continue,
         };
         match wire {
             Wire::Msg { text, .. } => {
@@ -371,16 +384,14 @@ async fn respond(
                 tokio::time::sleep(Duration::from_millis(300 + (now_ms() % 900) as u64)).await;
                 let reply = dev.replies[reply_idx % dev.replies.len()];
                 reply_idx += 1;
-                let out = serde_json::json!({
-                    "type": "msg",
-                    "text": format!("{reply} — “{text}”"),
-                    "ts": now_ms(),
-                });
-                wr.write_all(format!("{out}\n").as_bytes()).await?;
+                let out = Wire::Msg {
+                    text: format!("{reply} — “{text}”"),
+                    ts: now_ms(),
+                };
+                write_line(&mut wr, &out, keys.as_ref()).await?;
             }
             Wire::Ping { t } => {
-                let pong = serde_json::json!({ "type": "pong", "t": t });
-                wr.write_all(format!("{pong}\n").as_bytes()).await?;
+                write_line(&mut wr, &Wire::Pong { t }, keys.as_ref()).await?;
             }
             Wire::FileStart {
                 tid,
@@ -403,10 +414,8 @@ async fn respond(
                         if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
                             tr.buf.extend_from_slice(&bytes);
                         }
-                        let prog = serde_json::json!({
-                            "type": "file-progress", "tid": tid, "seq": seq, "bytes": tr.received(),
-                        });
-                        wr.write_all(format!("{prog}\n").as_bytes()).await?;
+                        let prog = Wire::FileProgress { tid, seq, bytes: tr.received() };
+                        write_line(&mut wr, &prog, keys.as_ref()).await?;
                     }
                 }
             }
@@ -431,13 +440,117 @@ async fn respond(
                             human_bytes(tr.buf.len() as u64),
                             detail
                         ));
-                        let done = serde_json::json!({
-                            "type": "file-done", "tid": tid, "ok": ok, "detail": detail,
-                        });
-                        wr.write_all(format!("{done}\n").as_bytes()).await?;
+                        let done = Wire::FileDone { tid, ok, detail };
+                        write_line(&mut wr, &done, keys.as_ref()).await?;
                     }
                 }
             }
+
+            // ---- demo file bridge -------------------------------------
+            Wire::FsListReq { rid, path } => {
+                let res = sim_list(share_root, &path);
+                let out = match res {
+                    Ok(entries) => Wire::FsListRes { rid, ok: true, error: String::new(), entries },
+                    Err(e) => Wire::FsListRes { rid, ok: false, error: e, entries: Vec::new() },
+                };
+                write_line(&mut wr, &out, keys.as_ref()).await?;
+            }
+            Wire::FsStatReq { rid, path } => {
+                let out = match sim_stat(share_root, &path) {
+                    Ok(entry) => Wire::FsStatRes { rid, ok: true, error: String::new(), entry: Some(entry) },
+                    Err(e) => Wire::FsStatRes { rid, ok: false, error: e, entry: None },
+                };
+                write_line(&mut wr, &out, keys.as_ref()).await?;
+            }
+            Wire::FsReadReq { rid, path, offset, len } => {
+                match sim_open(share_root, &path) {
+                    Ok(mut file) => {
+                        use std::io::{Read, Seek, SeekFrom};
+                        let _ = file.seek(SeekFrom::Start(offset));
+                        let mut remaining = if len == 0 { u64::MAX } else { len };
+                        let mut seq = 0u64;
+                        loop {
+                            let want = remaining.min(256 * 1024) as usize;
+                            let mut buf = vec![0u8; want];
+                            match file.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    buf.truncate(n);
+                                    remaining -= n as u64;
+                                    let eof = remaining == 0 || n < want;
+                                    let frame = Wire::FsData {
+                                        rid: rid.clone(),
+                                        seq,
+                                        data: base64::engine::general_purpose::STANDARD.encode(&buf),
+                                        eof,
+                                    };
+                                    write_line(&mut wr, &frame, keys.as_ref()).await?;
+                                    if eof {
+                                        break;
+                                    }
+                                    seq += 1;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        write_line(&mut wr, &Wire::FsErr { rid, error: e }, keys.as_ref()).await?;
+                    }
+                }
+            }
+            Wire::FsWriteStart { rid, path, size: _ } => {
+                let out = match sim_write_target(share_root, &path) {
+                    Ok(target) => {
+                        std::fs::write(&target, b"").ok();
+                        SIM_WRITES.with(|w| w.borrow_mut().insert(rid.clone(), target));
+                        Wire::FsOk { rid, ok: true, error: String::new() }
+                    }
+                    Err(e) => Wire::FsOk { rid, ok: false, error: e },
+                };
+                write_line(&mut wr, &out, keys.as_ref()).await?;
+            }
+            Wire::FsData { rid, data, .. } => {
+                if let Some(target) = SIM_WRITES.with(|w| w.borrow().get(&rid).cloned()) {
+                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&data) {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&target) {
+                            f.write_all(&bytes).ok();
+                        }
+                    }
+                }
+            }
+            Wire::FsWriteEnd { rid } => {
+                SIM_WRITES.with(|w| w.borrow_mut().remove(&rid));
+                let out = Wire::FsOk { rid, ok: true, error: String::new() };
+                write_line(&mut wr, &out, keys.as_ref()).await?;
+                log(&format!("{} ⇠ bridge upload finished", dev.name));
+            }
+            Wire::FsMkdirReq { rid, path } => {
+                let out = match sim_write_target(share_root, &path) {
+                    Ok(target) => {
+                        let ok = std::fs::create_dir_all(&target).is_ok();
+                        Wire::FsOk { rid, ok, error: String::new() }
+                    }
+                    Err(e) => Wire::FsOk { rid, ok: false, error: e },
+                };
+                write_line(&mut wr, &out, keys.as_ref()).await?;
+            }
+            Wire::FsDeleteReq { rid, path, recursive } => {
+                let out = match sim_write_target(share_root, &path) {
+                    Ok(target) => {
+                        let ok = if recursive {
+                            std::fs::remove_dir_all(&target).is_ok()
+                        } else {
+                            std::fs::remove_file(&target).is_ok()
+                        };
+                        Wire::FsOk { rid, ok, error: String::new() }
+                    }
+                    Err(e) => Wire::FsOk { rid, ok: false, error: e },
+                };
+                write_line(&mut wr, &out, keys.as_ref()).await?;
+            }
+
             Wire::Bye { reason } => {
                 log(&format!("{} ⇠ {peer_name} said bye ({reason})", dev.name));
                 return Ok(());
@@ -445,4 +558,140 @@ async fn respond(
             _ => {}
         }
     }
+}
+
+thread_local! {
+    /// rid → temp file for inbound bridge uploads (demo scale: one per conn).
+    static SIM_WRITES: std::cell::RefCell<HashMap<String, PathBuf>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+async fn write_line(
+    wr: &mut tokio::net::tcp::OwnedWriteHalf,
+    wire: &Wire,
+    keys: Option<&SessionKeys>,
+) -> std::io::Result<()> {
+    let mut line = match keys {
+        Some(k) => {
+            let plain = serde_json::to_vec(wire).map_err(|e| std::io::Error::other(e))?;
+            let (n, c) = crypto::seal(&k.send, &plain);
+            serde_json::to_string(&Wire::Sealed { n, c }).map_err(|e| std::io::Error::other(e))?
+        }
+        None => serde_json::to_string(wire).map_err(|e| std::io::Error::other(e))?,
+    };
+    line.push('\n');
+    wr.write_all(line.as_bytes()).await
+}
+
+fn parse_line(line: &str, keys: Option<&SessionKeys>) -> Option<Wire> {
+    let outer: Wire = serde_json::from_str(line).ok()?;
+    match (outer, keys) {
+        (Wire::Sealed { n, c }, Some(k)) => {
+            let plain = crypto::open(&k.recv, &n, &c).ok()?;
+            serde_json::from_slice(&plain).ok()
+        }
+        (Wire::Sealed { .. }, None) => None,
+        (w, _) => Some(w),
+    }
+}
+
+// --- tiny demo share: "/Storage/…" maps into a generated folder ----------
+
+fn sim_resolve(share_root: &PathBuf, path: &str) -> Result<PathBuf, String> {
+    let normalized = path.replace('\\', "/");
+    let segs: Vec<&str> = normalized
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    if segs.is_empty() {
+        return Ok(share_root.clone());
+    }
+    if segs[0] != "Storage" {
+        return Err(format!("no shared folder named “{}”", segs[0]));
+    }
+    let mut p = share_root.clone();
+    for seg in &segs[1..] {
+        if *seg == ".." || seg.contains(':') {
+            return Err("path escapes the share".into());
+        }
+        p.push(seg);
+    }
+    Ok(p)
+}
+
+fn sim_list(share_root: &PathBuf, path: &str) -> Result<Vec<FsEntryDto>, String> {
+    let target = sim_resolve(share_root, path)?;
+    if path == "/" || path.replace('\\', "/").trim_matches('/').is_empty() {
+        return Ok(vec![FsEntryDto {
+            kind: "dir".into(),
+            name: "Storage".into(),
+            size: 0,
+            modified: 0,
+        }]);
+    }
+    let mut out = Vec::new();
+    for ent in std::fs::read_dir(&target).map_err(|e| e.to_string())?.flatten() {
+        let Ok(meta) = ent.metadata() else { continue };
+        out.push(FsEntryDto {
+            kind: if meta.is_dir() { "dir".into() } else { "file".into() },
+            name: ent.file_name().to_string_lossy().to_string(),
+            size: meta.len(),
+            modified: 0,
+        });
+    }
+    out.sort_by(|a, b| (a.kind != "dir", a.name.to_lowercase()).cmp(&(b.kind != "dir", b.name.to_lowercase())));
+    Ok(out)
+}
+
+fn sim_stat(share_root: &PathBuf, path: &str) -> Result<FsEntryDto, String> {
+    let target = sim_resolve(share_root, path)?;
+    let meta = std::fs::metadata(&target).map_err(|e| e.to_string())?;
+    let name = target.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    Ok(FsEntryDto {
+        kind: if meta.is_dir() { "dir".into() } else { "file".into() },
+        name: if name.is_empty() { "Storage".into() } else { name },
+        size: meta.len(),
+        modified: 0,
+    })
+}
+
+fn sim_open(share_root: &PathBuf, path: &str) -> Result<std::fs::File, String> {
+    let target = sim_resolve(share_root, path)?;
+    std::fs::File::open(&target).map_err(|e| e.to_string())
+}
+
+fn sim_write_target(share_root: &PathBuf, path: &str) -> Result<PathBuf, String> {
+    sim_resolve(share_root, path)
+}
+
+/// Generate the demo share once per device: a Photos folder, a Documents
+/// folder and a README so drives from fake devices are not empty.
+fn seed_demo_share(dev: &SimDevice, base: &PathBuf) -> PathBuf {
+    let root = base.join(format!("sim-share-{}", dev.name.replace([' ', '(', ')'], "-")));
+    let _ = std::fs::create_dir_all(root.join("Photos"));
+    let _ = std::fs::create_dir_all(root.join("Documents"));
+    let readme = root.join("README.txt");
+    if !readme.exists() {
+        let text = format!(
+            "This folder is shared by the simulated device [{}].\nFiles you drop here are served to every connected peer over\nthe encrypted bridge - exactly like a real device.\n",
+            dev.name
+        );
+        let _ = std::fs::write(&readme, text);
+    }
+    let notes = root.join("Documents/notes.txt");
+    if !notes.exists() {
+        let _ = std::fs::write(&notes, "shopping list\n- coffee\n- more Wi-Fi\n");
+    }
+    for i in 1..=3 {
+        let photo = root.join(format!("Photos/IMG_{i:04}.jpg"));
+        if !photo.exists() {
+            let mut buf: Vec<u8> = Vec::new();
+            buf.extend_from_slice(
+                format!("/* fake jpeg payload from {} — photo {i} */\n", dev.name).as_bytes(),
+            );
+            buf.resize(48 * 1024 + i as usize * 1024, b'x');
+            let _ = std::fs::write(&photo, buf);
+        }
+    }
+    root
 }

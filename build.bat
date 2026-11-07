@@ -9,15 +9,15 @@ rem  WHAT IT DOES
 rem    1. compiles the release binaries with cargo
 rem    2. creates a fresh folder  Single\
 rem    3. fills it with everything the app needs:
-rem         Single-v0.1.3.exe        the app - double-click to run
+rem         Single-v%APP_VERSION%.exe  the app - double-click to run
 rem         Launch Single.bat        friendly starter
 rem         enable-firewall.bat      one-time LAN visibility fix (admin)
 rem         README.txt               end-user notes
 rem         received\                incoming files land here
 rem         tools\Device-Simulator.exe   optional 5-fake-device demo
-rem    4. zips the folder to Single-v0.1.3.zip for sharing
+rem    4. zips the folder to Single-v%APP_VERSION%.zip for sharing
 rem    5. puts the Android app next to the folder:
-rem         single-v0.1.3.apk  install on a phone and test for real
+rem         single-v%APP_VERSION%.apk  install on a phone and test for real
 rem       The prebuilt APK that ships with the source zip is used as-is;
 rem       when it is missing, a fresh one is built from source.
 rem

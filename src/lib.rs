@@ -11,7 +11,9 @@
 
 pub mod access;
 pub mod browser;
+pub mod bridge;
 pub mod config;
+pub mod crypto;
 pub mod files;
 pub mod mdns;
 pub mod p2p;
@@ -19,3 +21,4 @@ pub mod protocol;
 pub mod registry;
 pub mod server;
 pub mod util;
+pub mod webdav;

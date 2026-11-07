@@ -6,14 +6,3 @@ Cargo.lock
 /.tools
 /Single
 /Single-v*.zip
-
-# prebuilt APKs ship in releases, not in git (see build.bat fast path)
-/single-v*.apk
-/single-v*.apk.idsig
-
-# Android build artifacts (from-source APK path — see android/README.md)
-/android/.gradle
-/android/build
-/android/app/build
-/android/local.properties
-/android/app/src/main/jniLibs

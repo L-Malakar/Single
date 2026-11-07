@@ -17,7 +17,6 @@
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:usesCleartextTraffic="true"
-        android:extractNativeLibs="true"
         android:theme="@style/Theme.Single">
 
         <activity

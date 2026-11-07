@@ -72,87 +72,8 @@ button { font-family: var(--sans); }
 /* ---------------------------------------------------------------- shell */
 .app {
   display: flex;
-  height: 100vh;   /* fallback for browsers without dvh */
-  height: 100dvh;  /* correct on mobile — no content under system bars */
+  height: 100vh;
   overflow: hidden;
-}
-
-/* -- mobile chrome (top bar + bottom tab bar) — desktop: hidden -------- */
-.m-top, .m-bar { display: none; }
-
-.m-top {
-  position: fixed;
-  top: 0; left: 0; right: 0;
-  z-index: 60;
-  align-items: center;
-  gap: 10px;
-  padding: calc(10px + env(safe-area-inset-top, 0px)) 16px 10px;
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
-  -webkit-backdrop-filter: blur(14px);
-  backdrop-filter: blur(14px);
-  border-bottom: 1px solid var(--hairline);
-}
-.m-top .m-logo { width: 26px; height: 26px; display: block; }
-.m-top .m-title { font-size: 16.5px; font-weight: 700; letter-spacing: -0.3px; }
-.m-top .m-live {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 12px;
-  color: var(--text-2);
-  padding: 5px 10px;
-  border: 1px solid var(--hairline);
-  border-radius: 980px;
-  background: var(--surface-2);
-}
-.m-top .m-live .led { width: 7px; height: 7px; }
-
-.m-bar {
-  position: fixed;
-  bottom: 0; left: 0; right: 0;
-  z-index: 60;
-  justify-content: space-around;
-  padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
-  -webkit-backdrop-filter: blur(14px);
-  backdrop-filter: blur(14px);
-  border-top: 1px solid var(--hairline);
-}
-.m-tab {
-  position: relative;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 3px;
-  padding: 7px 2px 5px;
-  border: none;
-  background: transparent;
-  color: var(--text-3);
-  font-size: 10.5px;
-  font-weight: 600;
-  border-radius: 12px;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  transition: color 0.15s var(--ease);
-}
-.m-tab svg { width: 22px; height: 22px; }
-.m-tab.active { color: var(--accent); }
-.m-badge {
-  position: absolute;
-  top: 2px;
-  left: calc(50% + 4px);
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  display: grid;
-  place-items: center;
-  font-size: 10px;
-  font-weight: 700;
-  color: #fff;
-  background: var(--accent);
-  border-radius: 980px;
 }
 
 /* ---- sidebar ------------------------------------------------------------ */
@@ -317,7 +238,6 @@ button { font-family: var(--sans); }
   min-width: 0;
   overflow-y: auto;
   scroll-behavior: smooth;
-  overscroll-behavior-y: contain;
 }
 
 .page { display: none; padding: 30px 34px 44px; max-width: 1180px; margin-inline: auto; }
@@ -1007,31 +927,19 @@ button { font-family: var(--sans); }
 
 /* ---------------------------------------------------------------- responsive */
 @media (max-width: 980px) {
-  /* Phone/tablet layout: no left rail — a top bar with the live dot and a
-     bottom tab bar instead (see .m-top / .m-bar above). */
-  .sidebar { display: none; }
-  .m-top { display: flex; }
-  .m-bar { display: flex; }
-
-  /* keep every page clear of both bars + the gesture-inset areas:
-     this is what stops the bottom bar from covering content */
-  .content {
-    padding-top: calc(46px + env(safe-area-inset-top, 0px));
-  }
-  .page {
-    padding: 20px 16px calc(28px + 58px + env(safe-area-inset-bottom, 0px));
-  }
-  #page-chats.active {
-    padding: 14px 12px calc(16px + 58px + env(safe-area-inset-bottom, 0px));
-  }
-
+  .sidebar { width: 68px; padding: 14px 10px; }
+  .side-brand { justify-content: center; padding-bottom: 12px; }
+  .side-toggle { display: none; }
+  .side-name, .nav-label, .side-ver { display: none; }
+  .nav-item { justify-content: center; padding: 11px 0; }
+  .nav-badge { position: absolute; top: 4px; right: 10px; margin: 0; min-width: 16px; height: 16px; font-size: 10px; }
+  .ws-pill { justify-content: center; }
+  .ws-pill #wsText, .ws-pill .mono { display: none; }
+  .page { padding: 22px 18px 34px; }
   .chat-layout { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr); }
   .chat-list { max-height: 100%; }
   .chat-layout:has(.chat-view) { grid-template-rows: auto minmax(0, 1fr); }
   .chat-layout:has(.chat-view) .chat-list { max-height: 128px; }
-
-  /* drop the reconnect banner below the mobile top bar */
-  .reconnect-banner { top: calc(46px + env(safe-area-inset-top, 0px)); }
 }
 
 @media (max-width: 720px) {
@@ -1051,4 +959,178 @@ button { font-family: var(--sans); }
   .chat-head { gap: 9px; }
   .chat-head .hs-toggle { display: none; }
   .chat-head .rtt-badge { padding: 3px 7px; font-size: 10px; }
+}
+
+/* ---------------------------------------------------------------- files */
+.files-share-card { margin-bottom: 14px; }
+#page-files.active { display: flex; flex-direction: column; }
+
+/* ---- share manager ---- */
+.share-list { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 4px; }
+.share-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: var(--well);
+}
+.share-row .sr-icon {
+  width: 30px; height: 30px;
+  display: grid; place-items: center;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 9px;
+  flex-shrink: 0;
+}
+.share-row .sr-icon svg { width: 16px; height: 16px; }
+.share-row .grow { min-width: 0; }
+.sr-title { font-weight: 600; }
+.sr-path { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.share-row .btn.ghost { padding: 5px 10px; font-size: 12px; }
+.share-empty { color: var(--text-3); padding: 4px 2px 0; }
+
+.share-add { display: flex; gap: 8px; margin-top: 10px; }
+.share-add input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--hairline-2);
+  background: var(--well);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  outline: none;
+  transition: border-color 0.15s var(--ease);
+}
+.share-add input:focus { border-color: var(--accent-line); }
+
+/* ---- connected peers ---- */
+.bridge-peers {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.peer-card {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 13px 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  background: var(--surface-2);
+  transition: border-color 0.15s var(--ease), transform 0.15s var(--ease);
+}
+.peer-card.clickable { cursor: pointer; }
+.peer-card.clickable:hover { border-color: var(--accent-line); transform: translateY(-1px); }
+.peer-card.off { opacity: 0.55; }
+.pc-title { font-weight: 650; }
+.pc-sub { font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
+.pc-badges { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex-shrink: 0; }
+
+.enc-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--ok);
+  background: rgba(48, 209, 88, 0.10);
+  border: 1px solid rgba(48, 209, 88, 0.38);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.enc-badge svg { width: 10px; height: 10px; }
+.enc-badge.plain {
+  color: var(--warn);
+  background: rgba(255, 214, 10, 0.08);
+  border-color: rgba(255, 214, 10, 0.34);
+}
+.drive-chip {
+  display: inline-block;
+  padding: 3px 8px;
+  font-size: 10.5px;
+  font-weight: 700;
+  font-family: var(--mono);
+  color: var(--windows);
+  background: rgba(100, 210, 255, 0.10);
+  border: 1px solid rgba(100, 210, 255, 0.34);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+/* ---- peer browser ---- */
+.files-browser { margin-top: 14px; padding: 16px 18px; }
+.fs-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.fs-title { font-weight: 700; font-size: 15px; }
+.fs-crumb { margin-top: 3px; font-size: 12.5px; color: var(--text-3); overflow: hidden; }
+.fs-crumb .crumb { color: var(--accent); cursor: pointer; }
+.fs-crumb .crumb:hover { text-decoration: underline; }
+.fs-crumb .crumb.here { color: var(--text-2); cursor: default; }
+.fs-crumb .crumb.here:hover { text-decoration: none; }
+.fs-crumb .sep { margin: 0 6px; opacity: 0.5; }
+
+.fs-mkdir { display: flex; gap: 8px; margin: 12px 0 2px; }
+.fs-mkdir input {
+  flex: 0 1 320px;
+  border: 1px solid var(--accent);
+  background: var(--well);
+  color: var(--text);
+  border-radius: 9px;
+  padding: 7px 11px;
+  font-size: 13px;
+  outline: none;
+}
+
+.fs-status { margin: 10px 2px 0; font-size: 12.5px; min-height: 16px; }
+.fs-status.err { color: var(--err); }
+.fs-status.ok { color: var(--ok); }
+
+.fs-list { margin-top: 8px; border: 1px solid var(--hairline); border-radius: 12px; overflow: hidden; }
+.fs-row {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) 90px 150px auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 13px;
+  border-bottom: 1px solid var(--hairline);
+  background: transparent;
+  font-size: 13px;
+}
+.fs-list .fs-row:last-child { border-bottom: none; }
+.fs-row .f-ic { display: grid; place-items: center; color: var(--text-3); }
+.fs-row .f-ic svg { width: 16px; height: 16px; }
+.fs-row.dir { cursor: pointer; transition: background 0.12s var(--ease); }
+.fs-row.dir:hover { background: var(--surface-2); }
+.fs-row.dir:hover .f-name { color: var(--accent); }
+.f-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.f-size, .f-mod { color: var(--text-3); font-size: 12px; text-align: right; }
+.f-size { font-family: var(--mono); }
+.f-act { display: flex; gap: 6px; justify-content: flex-end; }
+.f-act .btn { padding: 5px 11px; font-size: 12px; }
+.fs-empty { padding: 26px 12px; text-align: center; color: var(--text-3); }
+
+/* loopback notice */
+.notice {
+  margin-top: 14px;
+  padding: 13px 16px;
+  border: 1px solid rgba(255, 214, 10, 0.34);
+  background: rgba(255, 214, 10, 0.07);
+  border-radius: 14px;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* responsive */
+@media (max-width: 720px) {
+  .fs-row { grid-template-columns: 22px minmax(0, 1fr) auto; }
+  .f-size, .f-mod { display: none; }
+  .share-add { flex-direction: column; }
+  .pc-badges { display: none; }
+  .fs-head .btn { padding: 6px 11px; font-size: 12px; }
 }

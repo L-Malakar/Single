@@ -18,13 +18,16 @@
 //! state events onto the WebSocket broadcast bus.
 
 use crate::access::{AccessControl, AccessMode, Approval, ConnectRequestInfo};
+use crate::bridge::{BridgeManager, READ_CHUNK};
 use crate::config::{MAGIC, PROTO_VER};
+use crate::crypto::{self, SessionKeys};
 use crate::files::{self, InboundTransfer, MAX_FILE_BYTES};
 use crate::protocol::*;
 use crate::registry::Device;
 use crate::util::{human_bytes, log_bus, now_ms, nonce};
 use base64::Engine;
 use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -52,6 +55,9 @@ pub struct SessionState {
     pub peer_addr: String,
     pub direction: String,
     pub state: String,
+    /// True once every frame on this session travels inside AES-256-GCM
+    /// envelopes (see `src/crypto.rs`).
+    pub encrypted: bool,
     pub error: Option<String>,
     pub steps: Vec<HandshakeStep>,
     pub rtt_ms: Option<u64>,
@@ -74,6 +80,7 @@ impl SessionState {
             peer_addr,
             direction: direction.to_string(),
             state: "connecting".to_string(),
+            encrypted: false,
             error: None,
             steps: Vec::new(),
             rtt_ms: None,
@@ -92,6 +99,7 @@ pub struct P2pManager {
     self_identity: Arc<RwLock<Identity>>,
     received_dir: PathBuf,
     access: Arc<AccessControl>,
+    bridge: Arc<BridgeManager>,
     sessions: Arc<Mutex<HashMap<String, SessionState>>>,
 }
 
@@ -101,43 +109,61 @@ impl P2pManager {
         self_identity: Arc<RwLock<Identity>>,
         received_dir: PathBuf,
         access: Arc<AccessControl>,
+        bridge: Arc<BridgeManager>,
     ) -> Arc<Self> {
         Arc::new(Self {
             bus,
             self_identity,
             received_dir,
             access,
+            bridge,
             sessions: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
+    /// Established sessions as `(peer_id, name, platform)` — feeds the
+    /// WebDAV peer table and the Files page.
+    pub fn established_sessions(&self) -> Vec<(String, String, String)> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|s| s.state == "established")
+            .map(|s| (s.peer_id.clone(), s.peer_name.clone(), s.peer_platform.clone()))
+            .collect()
+    }
+
+    /// Send one frame to a connected peer (used by the files bridge).
+    pub async fn send_to_peer(&self, peer_id: &str, wire: Wire) -> Result<(), String> {
+        let tx = {
+            let map = self.sessions.lock().unwrap();
+            map.get(peer_id)
+                .filter(|s| s.state == "established")
+                .and_then(|s| s.to_peer.clone())
+        };
+        let tx = tx.ok_or("no established session with this device")?;
+        tx.send(wire)
+            .await
+            .map_err(|_| "send failed (connection lost)".to_string())
+    }
+
+    /// Non-blocking variant — drops the frame when the queue is full rather
+    /// than waiting (the bridge re-requests on failure anyway).
+    pub fn try_send_to_peer(&self, peer_id: &str, wire: Wire) -> Result<(), String> {
+        let tx = {
+            let map = self.sessions.lock().unwrap();
+            map.get(peer_id)
+                .filter(|s| s.state == "established")
+                .and_then(|s| s.to_peer.clone())
+        };
+        let tx = tx.ok_or("no established session with this device")?;
+        tx.try_send(wire)
+            .map_err(|_| "send failed (connection busy or lost)".to_string())
+    }
+
     /// Bind the P2P TCP listener and start accepting peers.
     pub fn spawn_listener(self: &Arc<Self>, port: u16) -> std::io::Result<()> {
-        // Quick app-close → reopen race: the previous instance may still
-        // hold the port for a moment. Retry briefly instead of dying with
-        // "address already in use" (same hardening as the HTTP listener).
-        let mut std_listener = None;
-        let mut last_err = None;
-        for attempt in 1..=20u32 {
-            match std::net::TcpListener::bind(("0.0.0.0", port)) {
-                Ok(l) => {
-                    if attempt > 1 {
-                        log_bus(&self.bus, "ok", format!("P2P port {port} bound after {attempt} attempts"));
-                    }
-                    std_listener = Some(l);
-                    break;
-                }
-                Err(e) => {
-                    log_bus(&self.bus, "warn", format!("bind P2P port {port} failed ({e}) — retrying"));
-                    last_err = Some(e);
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
-            }
-        }
-        let std_listener = match std_listener {
-            Some(l) => l,
-            None => return Err(last_err.unwrap_or_else(|| std::io::Error::other("bind failed"))),
-        };
+        let std_listener = std::net::TcpListener::bind(("0.0.0.0", port))?;
         std_listener.set_nonblocking(true)?;
         let listener = TcpListener::from_std(std_listener)?;
         let this = self.clone();
@@ -271,6 +297,8 @@ impl P2pManager {
                 s.inbound = None;
             }
         }
+        // Fail any bridge requests/uploads that were riding this session.
+        self.bridge.peer_closed(peer_id);
         self.broadcast_session(peer_id, false);
     }
 
@@ -374,8 +402,11 @@ impl P2pManager {
         let (rd, mut wr) = sock.into_split();
         let mut lines = BufReader::new(rd).lines();
 
-        // Step 2: application-level SYN.
+        // Step 2: application-level SYN. A fresh ephemeral X25519 key rides
+        // along — when the peer answers with one too, the whole session is
+        // encrypted from here on (see src/crypto.rs).
         let my_nonce = nonce();
+        let e2ee_key = crypto::EphemeralKey::generate();
         let ident = self.self_identity.read().unwrap().clone();
         let password = self
             .sessions_lock()
@@ -390,6 +421,7 @@ impl P2pManager {
             platform: ident.platform.clone(),
             nonce: my_nonce.clone(),
             password,
+            e2ee: Some(e2ee_key.public_b64()),
         };
         if write_wire(&mut wr, &hello).await.is_err() {
             self.fail_session(&peer_id, "failed to send HELLO");
@@ -421,6 +453,7 @@ impl P2pManager {
             echo_nonce,
             nonce: peer_nonce,
             reason,
+            e2ee: peer_e2ee,
         } = ack
         else {
             unreachable!()
@@ -463,7 +496,7 @@ impl P2pManager {
             None,
         );
 
-        // Step 4: application-level ACK.
+        // Step 4: application-level ACK completing the handshake.
         if write_wire(&mut wr, &Wire::Ack { echo_nonce: peer_nonce.clone() }).await.is_err() {
             self.fail_session(&peer_id, "failed to send ACK");
             return;
@@ -475,6 +508,48 @@ impl P2pManager {
             format!("echoed peer nonce {peer_nonce} — handshake complete"),
             None,
         );
+
+        // E2EE: the peer answered with an X25519 public key → derive the
+        // session keys; every frame from here on is AES-256-GCM sealed.
+        let keys = match peer_e2ee.as_deref() {
+            Some(peer_pub) => match crypto::derive_keys(
+                &e2ee_key,
+                peer_pub,
+                &my_nonce,
+                &peer_nonce,
+                true,
+            ) {
+                Ok(k) => {
+                    {
+                        let mut map = self.sessions_lock();
+                        if let Some(s) = map.get_mut(&peer_id) {
+                            s.encrypted = true;
+                        }
+                    }
+                    self.add_step(
+                        &peer_id,
+                        "e2ee",
+                        "🔒 E2EE",
+                        "X25519 key exchange → AES-256-GCM session keys — chat, files and the bridge are encrypted",
+                        None,
+                    );
+                    Some(k)
+                }
+                Err(e) => {
+                    self.fail_session(&peer_id, &format!("E2EE key exchange failed: {e}"));
+                    return;
+                }
+            },
+            None => {
+                log_bus(
+                    &self.bus,
+                    "warn",
+                    format!("“{peer_name}” runs an older build without encryption — channel stays plaintext"),
+                );
+                None
+            }
+        };
+
         self.set_state(&peer_id, "established", None);
         self.add_step(
             &peer_id,
@@ -487,10 +562,10 @@ impl P2pManager {
         log_bus(
             &self.bus,
             "ok",
-            format!("handshake complete with {peer_name} in {total_ms:.1} ms"),
+            format!("handshake complete with {peer_name} in {total_ms:.1} ms{}", if keys.is_some() { " · 🔒 encrypted" } else { "" }),
         );
 
-        self.run_established(wr, lines, &peer_fn, started_ts).await;
+        self.run_established(wr, lines, &peer_fn, started_ts, keys).await;
     }
 
     // ------------------------------------------------------------------
@@ -518,6 +593,7 @@ impl P2pManager {
             platform: peer_platform,
             nonce: peer_nonce,
             password: hello_password,
+            e2ee: peer_e2ee,
         } = hello
         else {
             unreachable!()
@@ -535,6 +611,7 @@ impl P2pManager {
                     echo_nonce: String::new(),
                     nonce: String::new(),
                     reason: "invalid".into(),
+                    e2ee: None,
                 },
             )
             .await;
@@ -562,6 +639,7 @@ impl P2pManager {
                             echo_nonce: String::new(),
                             nonce: String::new(),
                             reason: "auth".into(),
+                            e2ee: None,
                         },
                     )
                     .await;
@@ -594,6 +672,7 @@ impl P2pManager {
                             echo_nonce: String::new(),
                             nonce: String::new(),
                             reason: approval.reason().into(),
+                            e2ee: None,
                         },
                     )
                     .await;
@@ -603,8 +682,10 @@ impl P2pManager {
             }
         };
 
-        // SYN-ACK.
+        // SYN-ACK. Our own ephemeral X25519 key rides along so the initiator
+        // can switch the session to AES-256-GCM right after its ACK.
         let my_nonce = nonce();
+        let e2ee_key = crypto::EphemeralKey::generate();
         let ident = self.self_identity.read().unwrap().clone();
         if write_wire(
             &mut wr,
@@ -613,9 +694,10 @@ impl P2pManager {
                 id: ident.id.clone(),
                 name: ident.name.clone(),
                 platform: ident.platform.clone(),
-                echo_nonce: peer_nonce,
+                echo_nonce: peer_nonce.clone(),
                 nonce: my_nonce.clone(),
                 reason: String::new(),
+                e2ee: Some(e2ee_key.public_b64()),
             },
         )
         .await
@@ -635,6 +717,20 @@ impl P2pManager {
 
         // Register the inbound session.
         self.drop_session(&peer_fn);
+        // E2EE: the initiator offered an X25519 key → derive session keys.
+        let keys = match peer_e2ee.as_deref() {
+            Some(peer_pub) => match crypto::derive_keys(
+                &e2ee_key,
+                peer_pub,
+                &peer_nonce,
+                &my_nonce,
+                false,
+            ) {
+                Ok(k) => Some(k),
+                Err(_) => None, // broken key material — fall back to plaintext
+            },
+            None => None,
+        };
         let state = SessionState::new(
             (
                 peer_fn.clone(),
@@ -650,10 +746,14 @@ impl P2pManager {
             map.insert(peer_fn.clone(), state);
             if let Some(s) = map.get_mut(&peer_fn) {
                 s.state = "established".to_string();
+                s.encrypted = keys.is_some();
                 s.steps.push(HandshakeStep {
                     step: "established".into(),
                     label: "ESTABLISHED".into(),
-                    detail: format!("inbound HELLO/HELLO_ACK/ACK with “{peer_name}” · {approved_note}"),
+                    detail: format!(
+                        "inbound HELLO/HELLO_ACK/ACK with “{peer_name}” · {approved_note}{}",
+                        if keys.is_some() { " · 🔒 E2EE (X25519 + AES-256-GCM)" } else { " · ⚠ plaintext (old peer build)" }
+                    ),
                     ts: now_ms(),
                     ms: None,
                 });
@@ -661,9 +761,13 @@ impl P2pManager {
         }
         self.broadcast_session(&peer_fn, true);
         self.push_chat_line(&peer_fn, "sys", format!("🔌 {peer_name} connected from {addr}"));
-        log_bus(&self.bus, "ok", format!("inbound handshake complete: {peer_name} ({addr})"));
+        log_bus(
+            &self.bus,
+            "ok",
+            format!("inbound handshake complete: {peer_name} ({addr}){}", if keys.is_some() { " · 🔒 encrypted" } else { "" }),
+        );
 
-        self.run_established(wr, lines, &peer_fn, started_ts).await;
+        self.run_established(wr, lines, &peer_fn, started_ts, keys).await;
     }
 
     // ------------------------------------------------------------------
@@ -676,6 +780,7 @@ impl P2pManager {
         mut lines: WireLines,
         peer_id: &str,
         started_ts: i64,
+        keys: Option<SessionKeys>,
     ) {
         let (tx, rx) = mpsc::channel::<Wire>(256);
         {
@@ -685,11 +790,13 @@ impl P2pManager {
             }
         }
 
-        // Writer: drains the mpsc queue onto the socket.
+        // Writer: drains the mpsc queue onto the socket — sealing every
+        // frame into an AES-256-GCM envelope when E2EE is active.
+        let send_key = keys.as_ref().map(|k| k.send);
         let this_w = self.clone();
         let peer_id_w = peer_id.to_string();
         tokio::spawn(async move {
-            this_w.run_writer(wr, rx, peer_id_w).await;
+            this_w.run_writer(wr, rx, peer_id_w, send_key).await;
         });
 
         // Latency ping loop.
@@ -697,7 +804,8 @@ impl P2pManager {
         let peer_id_p = peer_id.to_string();
         spawn_ping_loop(this_p, peer_id_p, started_ts);
 
-        // Reader: this task, inline.
+        // Reader: this task, inline. Unseals envelopes with the receive key.
+        let recv_key = keys.as_ref().map(|k| k.recv);
         loop {
             match lines.next_line().await {
                 Ok(None) => {
@@ -719,11 +827,22 @@ impl P2pManager {
                     if !self.is_current(peer_id, started_ts) {
                         return; // session was replaced; stop touching state
                     }
-                    match serde_json::from_str::<Wire>(&line) {
+                    match parse_frame(&line, recv_key) {
                         Ok(wire) => {
                             if self.handle_wire(peer_id, started_ts, wire).await.is_break() {
                                 return;
                             }
+                        }
+                        Err(e) if recv_key.is_some() => {
+                            // Any crypto failure on an encrypted session is
+                            // fatal — tampering or corruption must not pass.
+                            log_bus(
+                                &self.bus,
+                                "error",
+                                format!("encrypted frame from {peer_id} failed: {e} — closing"),
+                            );
+                            self.close_session(peer_id, &format!("encryption error: {e}"));
+                            return;
                         }
                         Err(e) => {
                             log_bus(
@@ -738,9 +857,15 @@ impl P2pManager {
         }
     }
 
-    async fn run_writer(&self, mut wr: OwnedWriteHalf, mut rx: mpsc::Receiver<Wire>, _peer: String) {
+    async fn run_writer(
+        &self,
+        mut wr: OwnedWriteHalf,
+        mut rx: mpsc::Receiver<Wire>,
+        _peer: String,
+        send_key: Option<[u8; 32]>,
+    ) {
         while let Some(wire) = rx.recv().await {
-            if write_wire(&mut wr, &wire).await.is_err() {
+            if write_frame(&mut wr, &wire, send_key).await.is_err() {
                 break;
             }
         }
@@ -1073,6 +1198,152 @@ impl P2pManager {
             Wire::Err { msg } => {
                 log_bus(&self.bus, "warn", format!("peer {peer_id} error frame: {msg}"));
             }
+
+            // ------------------------------------------------------------
+            // Files bridge — serving a peer's requests against our shares
+            // ------------------------------------------------------------
+            Wire::FsListReq { rid, path } => {
+                let wire = match self.bridge.serve_list(&path) {
+                    Ok(entries) => Wire::FsListRes { rid, ok: true, error: String::new(), entries },
+                    Err(e) => Wire::FsListRes { rid, ok: false, error: e, entries: Vec::new() },
+                };
+                send(self, wire).await;
+            }
+            Wire::FsStatReq { rid, path } => {
+                let wire = match self.bridge.serve_stat(&path) {
+                    Ok(entry) => Wire::FsStatRes { rid, ok: true, error: String::new(), entry: Some(entry) },
+                    Err(e) => Wire::FsStatRes { rid, ok: false, error: e, entry: None },
+                };
+                send(self, wire).await;
+            }
+            Wire::FsReadReq { rid, path, offset, len } => {
+                // Stream in a dedicated task so a 10 GB file doesn't stall
+                // the reader loop (chat keeps flowing while it streams).
+                let tx = {
+                    let map = self.sessions_lock();
+                    map.get(peer_id).and_then(|s| s.to_peer.clone())
+                };
+                let bridge = self.bridge.clone();
+                tokio::spawn(async move {
+                    let Some(tx) = tx else { return };
+                    let (mut file, _size) = match bridge.serve_open(&path) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let _ = tx.send(Wire::FsErr { rid, error: e }).await;
+                            return;
+                        }
+                    };
+                    if let Err(e) = file.seek(SeekFrom::Start(offset)) {
+                        let _ = tx
+                            .send(Wire::FsErr { rid, error: format!("seek failed: {e}") })
+                            .await;
+                        return;
+                    }
+                    let mut remaining = if len == 0 { u64::MAX } else { len };
+                    let mut seq = 0u64;
+                    let mut sent_eof = false;
+                    loop {
+                        let want = remaining.min(READ_CHUNK as u64) as usize;
+                        let mut buf = vec![0u8; want];
+                        match file.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                buf.truncate(n);
+                                remaining -= n as u64;
+                                let eof = remaining == 0 || n < want;
+                                if eof {
+                                    sent_eof = true;
+                                }
+                                let frame = Wire::FsData {
+                                    rid: rid.clone(),
+                                    seq,
+                                    data: base64::engine::general_purpose::STANDARD.encode(&buf),
+                                    eof,
+                                };
+                                if tx.send(frame).await.is_err() {
+                                    return; // peer went away mid-stream
+                                }
+                                if eof {
+                                    return;
+                                }
+                                seq += 1;
+                            }
+                            Err(e) => {
+                                let _ = tx
+                                    .send(Wire::FsErr { rid, error: format!("read failed: {e}") })
+                                    .await;
+                                return;
+                            }
+                        }
+                    }
+                    if !sent_eof {
+                        let _ = tx
+                            .send(Wire::FsData { rid, seq, data: String::new(), eof: true })
+                            .await;
+                    }
+                });
+            }
+            Wire::FsWriteStart { rid, path, size } => {
+                let wire = match self.bridge.serve_write_start(&rid, peer_id, &path, size) {
+                    Ok(()) => Wire::FsOk { rid, ok: true, error: String::new() },
+                    Err(e) => Wire::FsOk { rid, ok: false, error: e },
+                };
+                send(self, wire).await;
+            }
+            Wire::FsData { ref rid, ref data, .. } => {
+                // Either an upload chunk (peer writes into our share) or a
+                // reply chunk of a read we requested — the rid decides.
+                let decoded = base64::engine::general_purpose::STANDARD.decode(data);
+                match decoded {
+                    Ok(bytes) => match self.bridge.serve_write_chunk(rid, peer_id, &bytes) {
+                        Ok(true) => {} // consumed as an upload chunk
+                        Ok(false) => {
+                            self.bridge.dispatch_reply(peer_id, wire).await;
+                        }
+                        Err(e) => {
+                            send(self, Wire::FsErr { rid: rid.clone(), error: e }).await;
+                        }
+                    },
+                    Err(e) => {
+                        send(self, Wire::FsErr { rid: rid.clone(), error: format!("bad chunk encoding: {e}") }).await;
+                    }
+                }
+            }
+            Wire::FsWriteEnd { rid } => {
+                let wire = match self.bridge.serve_write_end(&rid, peer_id) {
+                    Ok(_bytes) => Wire::FsOk { rid, ok: true, error: String::new() },
+                    Err(e) => Wire::FsOk { rid, ok: false, error: e },
+                };
+                send(self, wire).await;
+            }
+            Wire::FsMkdirReq { rid, path } => {
+                let wire = match self.bridge.serve_mkdir(&path) {
+                    Ok(()) => Wire::FsOk { rid, ok: true, error: String::new() },
+                    Err(e) => Wire::FsOk { rid, ok: false, error: e },
+                };
+                send(self, wire).await;
+            }
+            Wire::FsDeleteReq { rid, path, recursive } => {
+                let wire = match self.bridge.serve_delete(&path, recursive) {
+                    Ok(()) => Wire::FsOk { rid, ok: true, error: String::new() },
+                    Err(e) => Wire::FsOk { rid, ok: false, error: e },
+                };
+                send(self, wire).await;
+            }
+
+            // ------------------------------------------------------------
+            // Files bridge — replies to the requests we sent
+            // ------------------------------------------------------------
+            Wire::FsListRes { .. }
+            | Wire::FsStatRes { .. }
+            | Wire::FsOk { .. } => {
+                self.bridge.dispatch_reply(peer_id, wire).await;
+            }
+            Wire::FsErr { rid, error } => {
+                if !self.bridge.serve_write_abort(&rid) {
+                    self.bridge.dispatch_reply(peer_id, Wire::FsErr { rid, error }).await;
+                }
+            }
             _ => {
                 log_bus(&self.bus, "warn", format!("unexpected frame from {peer_id}"));
             }
@@ -1190,6 +1461,7 @@ fn dto(s: &SessionState, include_chat: bool) -> SessionDto {
         peer_addr: s.peer_addr.clone(),
         direction: s.direction.clone(),
         state: s.state.clone(),
+        encrypted: s.encrypted,
         error: s.error.clone(),
         steps: s.steps.clone(),
         rtt_ms: s.rtt_ms,
@@ -1246,6 +1518,48 @@ async fn write_wire(wr: &mut OwnedWriteHalf, wire: &Wire) -> std::io::Result<()>
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     s.push('\n');
     wr.write_all(s.as_bytes()).await
+}
+
+/// Write one frame — sealed into an AES-256-GCM envelope when a key is set.
+async fn write_frame(
+    wr: &mut OwnedWriteHalf,
+    wire: &Wire,
+    key: Option<[u8; 32]>,
+) -> std::io::Result<()> {
+    let line = match key {
+        Some(k) => {
+            let plain = serde_json::to_vec(wire)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            let (n, c) = crypto::seal(&k, &plain);
+            let mut s = serde_json::to_string(&Wire::Sealed { n, c })
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            s.push('\n');
+            s
+        }
+        None => {
+            let mut s = serde_json::to_string(wire)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            s.push('\n');
+            s
+        }
+    };
+    wr.write_all(line.as_bytes()).await
+}
+
+/// Parse one line from the peer: a raw frame, or an encrypted envelope.
+fn parse_frame(line: &str, key: Option<[u8; 32]>) -> Result<Wire, String> {
+    let outer: Wire = serde_json::from_str(line).map_err(|e| format!("bad frame: {e}"))?;
+    match (outer, key) {
+        (Wire::Sealed { n, c }, Some(k)) => {
+            let plain = crypto::open(&k, &n, &c)?;
+            serde_json::from_slice(&plain).map_err(|e| format!("bad sealed frame: {e}"))
+        }
+        (Wire::Sealed { .. }, None) => Err("unexpected encrypted frame from peer".into()),
+        (_, Some(_)) => {
+            Err("unencrypted frame after E2EE was enabled — rejected".into())
+        }
+        (w, None) => Ok(w),
+    }
 }
 
 fn spawn_ping_loop(this: Arc<P2pManager>, peer_id: String, started_ts: i64) {

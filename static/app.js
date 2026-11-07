@@ -51,6 +51,10 @@ const state = {
   reconnectSec: 1,
   wsPingSent: 0,
   pendingConnect: null,
+  /* files bridge — latest snapshot pushed by the server (Files page) */
+  bridge: null,
+  filesPeer: null,        // peer_id currently browsed
+  filesPath: [],          // logical path segments inside the peer's shares
   /* Home › Protocol — inbound connection policy (mirrored on the server) */
   access: { mode: "private", password: "" },
   reqQueue: [],             // pending Private-mode connect-requests
@@ -60,25 +64,14 @@ const state = {
 
 /* ================================================================== pages */
 
-const PAGE_KEY = "single-page";
-const PAGES = ["home", "devices", "chats", "activity", "settings"];
-
 function showPage(name) {
   state.page = name;
   document.querySelectorAll(".page").forEach((p) => p.classList.toggle("active", p.id === `page-${name}`));
   document.querySelectorAll("#sideNav .nav-item").forEach((b) => b.classList.toggle("active", b.dataset.page === name));
-  /* mobile bottom tab bar mirrors the sidebar */
-  document.querySelectorAll("#mBar .m-tab").forEach((b) => b.classList.toggle("active", b.dataset.page === name));
-  try { localStorage.setItem(PAGE_KEY, name); } catch {}
 }
 
 $("sideNav").addEventListener("click", (e) => {
   const btn = e.target.closest(".nav-item");
-  if (btn) showPage(btn.dataset.page);
-});
-
-$("mBar").addEventListener("click", (e) => {
-  const btn = e.target.closest(".m-tab");
   if (btn) showPage(btn.dataset.page);
 });
 
@@ -190,11 +183,13 @@ function updateHome() {
   $("homeName").textContent = state.self.name;
   const n = state.devices.size;
   const established = [...state.sessions.values()].filter((s) => s.dto.state === "established").length;
+  const shares = (state.bridge && state.bridge.shares.length) || 0;
   const bits = [
     `${state.self.ip}:${state.self.p2p_port}`,
     n === 0 ? "scanning for devices…" : `${n} device${n === 1 ? "" : "s"} nearby`,
   ];
   if (established > 0) bits.push(`${established} connected`);
+  if (shares > 0) bits.push(`sharing ${shares} folder${shares === 1 ? "" : "s"}`);
   bits.push(`protocol: ${state.access.mode}`);
   $("homeSub").textContent = bits.join("  ·  ");
 }
@@ -263,9 +258,6 @@ function send(obj) {
 function setWsStatus(cls, text) {
   $("wsLed").className = "led " + cls;
   $("wsText").textContent = text;
-  /* mirror onto the mobile top bar */
-  $("mLed").className = "led " + cls;
-  $("mWsText").textContent = cls === "on" ? "live" : text;
 }
 
 /* ================================================================== dispatch */
@@ -311,6 +303,10 @@ function handle(msg) {
       break;
     case "access-state":
       applyAccess(msg);
+      break;
+    case "bridge":
+      state.bridge = msg.bridge;
+      renderFiles();
       break;
     case "connect-request":
       state.reqQueue.push(msg);
@@ -574,6 +570,7 @@ function openChat(peerId) {
         <div class="chat-sub mono">${d.direction === "in" ? "←" : "→"} ${esc(d.peer_addr)}</div>
       </div>
       <span class="state-chip ${esc(d.state)}"></span>
+      <span class="enc-badge hidden" data-enc></span>
       <span class="rtt-badge hidden"></span>
       <button class="hs-toggle" data-act="hs" title="Show / hide the TCP handshake timeline">handshake</button>
       <button class="icon-btn" title="Send BYE and close" data-act="close">✕</button>
@@ -627,6 +624,21 @@ function updateChatView(s, fullRebuild = false) {
   if (d.rtt_ms != null) {
     rtt.classList.remove("hidden");
     rtt.textContent = `RTT ${d.rtt_ms} ms`;
+  }
+
+  /* E2EE chip — green lock when the session runs on sealed frames */
+  const enc = view.querySelector("[data-enc]");
+  if (d.encrypted) {
+    enc.classList.remove("hidden", "plain");
+    enc.innerHTML = `${LOCK_IC}E2EE`;
+    enc.title = "Sealed with AES-256-GCM — keys from the X25519 exchange during the handshake";
+  } else if (d.state === "established") {
+    enc.classList.remove("hidden");
+    enc.classList.add("plain");
+    enc.textContent = "no E2EE";
+    enc.title = "This peer runs an older build — frames travel as plaintext";
+  } else {
+    enc.classList.add("hidden");
   }
 
   view.querySelector(".chat-input input").disabled = d.state !== "established";
@@ -798,6 +810,268 @@ function bufToB64(bytes) {
   return btoa(bin);
 }
 
+/* ================================================================== files page
+   Sharing (set-shares over the WS) + browsing a peer's shares over the
+   loopback-only REST bridge (/api/bridge/*). The E2EE badge mirrors the
+   session's `encrypted` flag. */
+
+const FOLDER_IC = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7V5.5A1.5 1.5 0 0 1 5 4h4l2 2.5h8A1.5 1.5 0 0 1 20.5 8V9"/><path d="M3.5 7a1.5 1.5 0 0 0-1.5 1.5l1.8 8.6A1.5 1.5 0 0 0 5.3 18.5h13.9a1.5 1.5 0 0 0 1.5-1.2l1.8-8.6A1.5 1.5 0 0 0 21 7H3.5z"/></svg>`;
+const FILE_IC = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 3.5H7A1.5 1.5 0 0 0 5.5 5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8.5L13.5 3.5z"/><path d="M13.5 3.5V8.5H18.5"/></svg>`;
+const LOCK_IC = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>`;
+
+function fsLogPath(segs) {
+  return "/" + segs.map((s) => encodeURIComponent(s)).join("/");
+}
+
+function renderFiles() {
+  renderShares();
+  renderPeers();
+  renderBrowserHead();
+  updateHome();
+}
+
+/* ---- sharing card ---- */
+
+function renderShares() {
+  const box = $("shareList");
+  const shares = (state.bridge && state.bridge.shares) || [];
+  if (!shares.length) {
+    box.innerHTML = `<div class="share-empty">Nothing shared yet — add a folder below. Connected devices see it in their Files page.</div>`;
+    return;
+  }
+  box.innerHTML = shares.map((s, i) => `
+    <div class="share-row">
+      <span class="sr-icon">${FOLDER_IC}</span>
+      <div class="grow">
+        <div class="sr-title">${esc(s.title)}</div>
+        <div class="sr-path mono">${esc(s.path)}</div>
+      </div>
+      <button class="btn ghost" data-del="${i}" title="Stop sharing this folder">✕ Stop</button>
+    </div>`).join("");
+}
+
+$("shareList").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-del]");
+  if (!btn || !state.bridge) return;
+  const shares = state.bridge.shares.filter((_, i) => i !== Number(btn.dataset.del))
+    .map((s) => ({ title: s.title, path: s.path }));
+  send({ type: "set-shares", shares }); // server echoes a fresh bridge snapshot
+});
+
+function addShare() {
+  if (!state.bridge) return;
+  const input = $("sharePath");
+  const path = input.value.trim().replace(/[\\/]+$/, "");
+  if (!path) { input.focus(); return; }
+  const shares = state.bridge.shares.map((s) => ({ title: s.title, path: s.path }));
+  shares.push({ title: "", path }); // server derives the title from the basename
+  send({ type: "set-shares", shares });
+  input.value = "";
+  $("fsLoopback").classList.add("hidden");
+  $("shareHint").textContent = "Adding — folders that do not exist are ignored (see Activity).";
+  setTimeout(() => { $("shareHint").textContent = "The folder must already exist — its name becomes the title peers see."; }, 4000);
+}
+
+$("shareAdd").addEventListener("click", addShare);
+$("sharePath").addEventListener("keydown", (e) => { if (e.key === "Enter") addShare(); });
+
+/* ---- connected devices card ---- */
+
+function renderPeers() {
+  const box = $("bridgePeers");
+  const b = state.bridge;
+  const peers = (b && b.peers) || [];
+  const hint = $("drivesHint");
+  hint.textContent = b && b.drives_enabled
+    ? "Each connected device maps its own drive letter in This PC — one more device, one more drive."
+    : "Connect to a device from the Devices page, then browse its shares here. On Windows each device also maps a drive letter in This PC.";
+  if (!peers.length) {
+    box.innerHTML = `<div class="share-empty">No connected devices yet. Connect from the <b>Devices</b> page — its shares then appear here.</div>`;
+    return;
+  }
+  box.innerHTML = peers.map((p) => {
+    const on = p.state === "established";
+    const enc = p.encrypted
+      ? `<span class="enc-badge" title="Every frame on this channel is sealed with AES-256-GCM after the X25519 key exchange">${LOCK_IC}E2EE</span>`
+      : `<span class="enc-badge plain" title="This peer runs an older build — frames travel as plaintext">no E2EE</span>`;
+    const drive = p.drive ? `<span class="drive-chip" title="Mapped in This PC">${esc(p.drive)}</span>` : "";
+    const plat = `<span class="platform-badge ${esc(p.peer_platform)}">${LABEL[p.peer_platform] || esc(p.peer_platform)}</span>`;
+    return `
+    <div class="peer-card ${on ? "clickable" : "off"}" data-peer="${esc(p.peer_id)}" title="${on ? "Browse this device's shares" : "Handshake not established"}">
+      <span class="dev-icon">${ICONS[p.peer_platform] || ICONS.unknown}</span>
+      <div class="grow">
+        <div class="pc-title">${esc(p.peer_name)}</div>
+        <div class="pc-sub">${on ? "tap to browse its shares" : "connecting…"}</div>
+      </div>
+      <div class="pc-badges">${drive}${enc}${plat}</div>
+    </div>`;
+  }).join("");
+}
+
+$("bridgePeers").addEventListener("click", (e) => {
+  const card = e.target.closest(".peer-card.clickable");
+  if (card) openFs(card.dataset.peer, []);
+});
+
+/* ---- peer browser ---- */
+
+function renderBrowserHead() {
+  const p = peerById(state.filesPeer);
+  const browser = $("filesBrowser");
+  if (!p) { browser.classList.add("hidden"); return; }
+  browser.classList.remove("hidden");
+  $("fsIcon").innerHTML = ICONS[p.peer_platform] || ICONS.unknown;
+  $("fsTitle").textContent = p.peer_name;
+  const enc = $("fsEnc");
+  if (p.encrypted) { enc.classList.remove("hidden", "plain"); }
+  else { enc.classList.remove("hidden"); enc.classList.add("plain"); enc.textContent = "no E2EE"; }
+  if (p.encrypted) enc.innerHTML = `${LOCK_IC}E2EE`;
+
+  /* breadcrumb: peer name › Shares › segment … */
+  const crumbs = [`<span class="crumb" data-c="-1">Shares</span>`];
+  state.filesPath.forEach((seg, i) => {
+    crumbs.push(`<span class="sep">/</span><span class="crumb${i === state.filesPath.length - 1 ? " here" : ""}" data-c="${i}">${esc(seg)}</span>`);
+  });
+  $("fsCrumb").innerHTML = crumbs.join("");
+}
+
+function peerById(id) {
+  const b = state.bridge;
+  return b && b.peers.find((p) => p.peer_id === id) || null;
+}
+
+$("fsCrumb").addEventListener("click", (e) => {
+  const c = e.target.closest(".crumb[data-c]");
+  if (!c || c.classList.contains("here")) return;
+  const n = Number(c.dataset.c);
+  if (n < 0) state.filesPath = [];
+  else state.filesPath = state.filesPath.slice(0, n + 1);
+  fetchFs();
+});
+
+function openFs(peerId, path) {
+  state.filesPeer = peerId;
+  state.filesPath = path || [];
+  $("fsLoopback").classList.add("hidden");
+  fetchFs();
+}
+
+function fsStatus(text, cls) {
+  const el = $("fsStatus");
+  el.textContent = text || "";
+  el.className = "fs-status " + (cls || "dim");
+}
+
+async function fetchFs() {
+  if (!state.filesPeer) return;
+  renderBrowserHead();
+  const list = $("fsList");
+  list.innerHTML = `<div class="fs-empty">loading…</div>`;
+  const q = `peer=${encodeURIComponent(state.filesPeer)}&path=${encodeURIComponent(fsLogPath(state.filesPath))}`;
+  try {
+    const r = await fetch(`/api/bridge/list?${q}`);
+    if (r.status === 403) {
+      $("fsLoopback").classList.remove("hidden");
+      list.innerHTML = `<div class="fs-empty">blocked</div>`;
+      return;
+    }
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.error || "listing failed");
+    /* a good listing clears a stale error — success notes (✓ saved) stay */
+    if ($("fsStatus").classList.contains("err")) fsStatus("");
+    if (!data.entries.length) {
+      list.innerHTML = `<div class="fs-empty">empty folder</div>`;
+      return;
+    }
+    list.innerHTML = data.entries.map((en) => {
+      if (en.kind === "dir") {
+        return `<div class="fs-row dir" data-open="${esc(en.name)}">
+          <span class="f-ic">${FOLDER_IC}</span>
+          <span class="f-name">${esc(en.name)}</span>
+          <span class="f-size">—</span>
+          <span class="f-mod">${new Date(en.modified).toLocaleString()}</span>
+          <span class="f-act"></span>
+        </div>`;
+      }
+      const q2 = `peer=${encodeURIComponent(state.filesPeer)}&path=${encodeURIComponent(fsLogPath(state.filesPath.concat(en.name)))}`;
+      return `<div class="fs-row">
+        <span class="f-ic">${FILE_IC}</span>
+        <span class="f-name">${esc(en.name)}</span>
+        <span class="f-size">${fmtBytes(en.size)}</span>
+        <span class="f-mod">${new Date(en.modified).toLocaleString()}</span>
+        <span class="f-act"><a class="btn small ghost" href="/api/bridge/file?${q2}" download="${esc(en.name)}">Download</a></span>
+      </div>`;
+    }).join("");
+  } catch (err) {
+    list.innerHTML = `<div class="fs-empty">—</div>`;
+    fsStatus(err.message || "listing failed", "err");
+  }
+}
+
+$("fsList").addEventListener("click", (e) => {
+  const row = e.target.closest(".fs-row.dir");
+  if (!row) return;
+  state.filesPath.push(row.dataset.open);
+  fetchFs();
+});
+
+$("fsRefresh").addEventListener("click", fetchFs);
+
+/* new folder */
+$("fsMkdirBtn").addEventListener("click", () => {
+  $("fsMkdirRow").classList.remove("hidden");
+  $("fsMkdirName").value = "";
+  $("fsMkdirName").focus();
+});
+$("fsMkdirCancel").addEventListener("click", () => $("fsMkdirRow").classList.add("hidden"));
+
+async function fsMkdir() {
+  const name = $("fsMkdirName").value.trim();
+  if (!name) { $("fsMkdirName").focus(); return; }
+  const q = `peer=${encodeURIComponent(state.filesPeer)}&path=${encodeURIComponent(fsLogPath(state.filesPath.concat(name)))}`;
+  try {
+    const r = await fetch(`/api/bridge/mkdir?${q}`, { method: "POST" });
+    const data = await r.json();
+    if (r.status === 403) { $("fsLoopback").classList.remove("hidden"); return; }
+    if (!data.ok) throw new Error(data.error || "mkdir failed");
+    $("fsMkdirRow").classList.add("hidden");
+    fetchFs();
+  } catch (err) {
+    fsStatus(err.message || "mkdir failed", "err");
+  }
+}
+$("fsMkdirGo").addEventListener("click", fsMkdir);
+$("fsMkdirName").addEventListener("keydown", (e) => { if (e.key === "Enter") fsMkdir(); });
+
+/* upload — XHR for progress events */
+$("fsUpload").addEventListener("click", () => { if (state.filesPeer) $("filesPicker").click(); });
+
+$("filesPicker").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file || !state.filesPeer) return;
+  const target = state.filesPath.concat(file.name);
+  const q = `peer=${encodeURIComponent(state.filesPeer)}&path=${encodeURIComponent(fsLogPath(target))}`;
+  const xhr = new XMLHttpRequest();
+  xhr.open("PUT", `/api/bridge/upload?${q}`);
+  fsStatus(`↑ ${file.name} — 0%`, "dim");
+  xhr.upload.onprogress = (ev) => {
+    if (ev.lengthComputable) {
+      fsStatus(`↑ ${file.name} — ${Math.round((ev.loaded / ev.total) * 100)}%`, "dim");
+    }
+  };
+  xhr.onload = () => {
+    if (xhr.status === 403) { $("fsLoopback").classList.remove("hidden"); return; }
+    try {
+      const data = JSON.parse(xhr.responseText);
+      if (data.ok) { fsStatus(`✓ saved “${file.name}” on the peer`, "ok"); fetchFs(); }
+      else fsStatus(data.error || "upload failed", "err");
+    } catch { fsStatus("upload failed (" + xhr.status + ")", "err"); }
+  };
+  xhr.onerror = () => fsStatus("upload failed — connection error", "err");
+  xhr.send(file);
+});
+
 /* ================================================================== badge */
 
 function updateNavBadge() {
@@ -805,10 +1079,6 @@ function updateNavBadge() {
   const badge = $("navBadge");
   badge.textContent = total > 99 ? "99+" : total;
   badge.classList.toggle("hidden", total === 0);
-  /* mirror onto the mobile bottom bar */
-  const mBadge = $("mBadge");
-  mBadge.textContent = total > 99 ? "99+" : total;
-  mBadge.classList.toggle("hidden", total === 0);
 }
 
 /* ================================================================== connect requests
@@ -963,10 +1233,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   renderAccess();
   try { state.devicePasswords = JSON.parse(localStorage.getItem("single-device-pw") || "{}"); } catch {}
   applySide(localStorage.getItem(SIDE_KEY) === "mini");
-  /* reopen on the page that was open last time (mobile habit) */
-  let last = null;
-  try { last = localStorage.getItem(PAGE_KEY); } catch {}
-  showPage(PAGES.includes(last) ? last : "home");
+  showPage("home");
   connect();
   appendLog("info", "dashboard booted — connecting to control channel…", Date.now());
 })();

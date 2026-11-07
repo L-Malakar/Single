@@ -80,6 +80,9 @@ pub struct SessionDto {
     pub direction: String,
     /// `connecting` | `established` | `closed` | `error`
     pub state: String,
+    /// True once the session runs on AES-256-GCM sealed frames (both sides
+    /// completed the X25519 key exchange during the handshake).
+    pub encrypted: bool,
     pub error: Option<String>,
     pub steps: Vec<HandshakeStep>,
     pub rtt_ms: Option<u64>,
@@ -88,6 +91,56 @@ pub struct SessionDto {
     /// Full chat history — `Some` only on session creation / initial sync,
     /// `None` on routine updates (chat lines arrive as separate `Chat` events).
     pub chat: Option<Vec<ChatLine>>,
+}
+
+/// One entry of a remote directory listing (files bridge).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct FsEntryDto {
+    /// `dir` | `file`
+    pub kind: String,
+    pub name: String,
+    /// Bytes (files only, 0 for dirs).
+    pub size: u64,
+    /// Modified time, ms since epoch (0 when unknown).
+    pub modified: i64,
+}
+
+/// A folder this device shares with connected peers.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ShareRootDto {
+    /// How the folder appears in the remote file browser.
+    pub title: String,
+    /// Absolute local path.
+    pub path: String,
+}
+
+/// One connected device as seen by the Files page / OS mounts.
+#[derive(Serialize, Clone, Debug)]
+pub struct BridgePeerDto {
+    pub peer_id: String,
+    pub peer_name: String,
+    pub peer_platform: String,
+    /// `established` | anything else → not bridgeable yet.
+    pub state: String,
+    pub encrypted: bool,
+    /// Windows only: drive letter currently mapped in This PC (e.g. `"Z:"`),
+    /// `None` on other platforms or while mapping.
+    pub drive: Option<String>,
+}
+
+/// Full snapshot of the file-bridge state, pushed to dashboards and served
+/// by `GET /api/bridge/status` (the Android documents provider uses it too).
+#[derive(Serialize, Clone, Debug)]
+pub struct BridgeDto {
+    /// Folders this device shares with peers.
+    pub shares: Vec<ShareRootDto>,
+    /// Connected peers (all sessions, any state).
+    pub peers: Vec<BridgePeerDto>,
+    /// Loopback WebDAV port (`http://127.0.0.1:<port>/dav/<peer>`), Windows
+    /// maps one drive letter per peer from it.
+    pub dav_port: u16,
+    /// True on Windows when the drive-mapping machinery is active.
+    pub drives_enabled: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +169,10 @@ pub enum ServerMsg {
     /// Current inbound policy (Home › Protocol), pushed on connect + on change.
     #[serde(rename = "access-state")]
     AccessState { mode: String, has_password: bool },
+    /// Files-bridge snapshot (shared folders + connected peers + drive
+    /// letters), pushed on change and on connect.
+    #[serde(rename = "bridge")]
+    Bridge { bridge: BridgeDto },
     /// Private mode: a peer wants in — the dashboard must accept / decline.
     #[serde(rename = "connect-request")]
     ConnectRequest {
@@ -173,6 +230,9 @@ pub enum ClientMsg {
     /// Answer to a Private-mode `connect-request`.
     #[serde(rename = "connect-reply")]
     ConnectReply { id: String, accept: bool },
+    /// Files page — replace the list of shared folders.
+    #[serde(rename = "set-shares")]
+    SetShares { shares: Vec<ShareRootDto> },
     #[serde(rename = "disconnect")]
     Disconnect { session_id: String },
     #[serde(rename = "chat")]
@@ -217,6 +277,10 @@ pub enum Wire {
         /// Only meaningful when the responder runs in Protected mode.
         #[serde(default)]
         password: String,
+        /// Base64 X25519 ephemeral public key. When both sides send one, every
+        /// frame after the ACK travels inside AES-256-GCM envelopes (`Sealed`).
+        #[serde(default)]
+        e2ee: Option<String>,
     },
     /// Responder → initiator. Application-level SYN-ACK.
     #[serde(rename = "hello-ack")]
@@ -231,6 +295,9 @@ pub enum Wire {
         /// (Private mode, operator said no) or `timeout` (nobody answered).
         #[serde(default)]
         reason: String,
+        /// Base64 X25519 ephemeral public key (see [`Wire::Hello`]).
+        #[serde(default)]
+        e2ee: Option<String>,
     },
     /// Initiator → responder. Application-level ACK completing the handshake.
     #[serde(rename = "ack")]
@@ -269,4 +336,83 @@ pub enum Wire {
     /// Protocol error frame.
     #[serde(rename = "err")]
     Err { msg: String },
+
+    // ------------------------------------------------------------------
+    // Encrypted envelope: after a successful ECDH both sides wrap every
+    // further frame. The plaintext is the JSON of the inner [`Wire`].
+    // ------------------------------------------------------------------
+    #[serde(rename = "e")]
+    Sealed {
+        /// Base64 12-byte AES-GCM nonce.
+        n: String,
+        /// Base64 ciphertext || 16-byte tag.
+        c: String,
+    },
+
+    // ------------------------------------------------------------------
+    // Files bridge — request/response frames multiplexed by `rid` over the
+    // (usually sealed) P2P channel. Paths are logical: "/" lists the peer's
+    // shared roots, "/<root>/…" descends into one.
+    // ------------------------------------------------------------------
+    /// List a directory.
+    #[serde(rename = "fs-list-req")]
+    FsListReq { rid: String, path: String },
+    #[serde(rename = "fs-list-res")]
+    FsListRes {
+        rid: String,
+        ok: bool,
+        #[serde(default)]
+        error: String,
+        #[serde(default)]
+        entries: Vec<FsEntryDto>,
+    },
+    /// Stat a single path.
+    #[serde(rename = "fs-stat-req")]
+    FsStatReq { rid: String, path: String },
+    #[serde(rename = "fs-stat-res")]
+    FsStatRes {
+        rid: String,
+        ok: bool,
+        #[serde(default)]
+        error: String,
+        #[serde(default)]
+        entry: Option<FsEntryDto>,
+    },
+    /// Read `len` bytes from `offset` (`len` = 0 → to EOF); answered with a
+    /// stream of `fs-data` frames, optionally terminated by `fs-err`.
+    #[serde(rename = "fs-read-req")]
+    FsReadReq { rid: String, path: String, offset: u64, len: u64 },
+    #[serde(rename = "fs-data")]
+    FsData {
+        rid: String,
+        seq: u64,
+        /// Base64 payload chunk (≤ 256 KB).
+        data: String,
+        eof: bool,
+    },
+    /// Aborts a pending `rid` (read or write).
+    #[serde(rename = "fs-err")]
+    FsErr { rid: String, error: String },
+    /// Create / truncate a file on the peer, then stream `fs-data` frames
+    /// (same shape as reads) and close with `fs-write-end`.
+    #[serde(rename = "fs-write-start")]
+    FsWriteStart { rid: String, path: String, size: u64 },
+    #[serde(rename = "fs-write-end")]
+    FsWriteEnd { rid: String },
+    /// Generic success/failure reply for mkdir / delete / write-end.
+    #[serde(rename = "fs-ok")]
+    FsOk {
+        rid: String,
+        ok: bool,
+        #[serde(default)]
+        error: String,
+    },
+    #[serde(rename = "fs-mkdir-req")]
+    FsMkdirReq { rid: String, path: String },
+    #[serde(rename = "fs-delete-req")]
+    FsDeleteReq {
+        rid: String,
+        path: String,
+        recursive: bool,
+    },
 }

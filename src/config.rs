@@ -30,8 +30,14 @@ pub struct Config {
     pub http_port: u16,
     /// TCP port peers connect to for the P2P handshake.
     pub p2p_port: u16,
+    /// Loopback WebDAV port (per-peer drive mapping on Windows).
+    pub dav_port: u16,
     /// Where inbound file transfers are stored.
     pub received_dir: PathBuf,
+    /// Folders shared with connected devices over the encrypted bridge.
+    pub shares: Vec<crate::protocol::ShareRootDto>,
+    /// `--no-share`: start with an empty share list.
+    pub no_share: bool,
     /// Register our own mDNS service (disable with `--no-announce`).
     pub announce: bool,
     /// Also join the loopback interface for mDNS (containers / offline dev).
@@ -49,7 +55,10 @@ impl Config {
             name: default_device_name(),
             http_port: 3000,
             p2p_port: 5050,
+            dav_port: 5051,
             received_dir: PathBuf::from("received"),
+            shares: Vec::new(),
+            no_share: false,
             announce: true,
             mdns_loopback: false,
             static_dir: None,
@@ -61,8 +70,20 @@ impl Config {
                 "--name" | "-n" => cfg.take_str(&args, &mut i, |c, v| c.name = v),
                 "--http-port" => cfg.take_val(&args, &mut i, |c, v| c.http_port = v),
                 "--p2p-port" => cfg.take_val(&args, &mut i, |c, v| c.p2p_port = v),
+                "--dav-port" => cfg.take_val(&args, &mut i, |c, v| c.dav_port = v),
                 "--received-dir" => {
                     cfg.take_str(&args, &mut i, |c, v| c.received_dir = PathBuf::from(v))
+                }
+                "--share" => cfg.take_str(&args, &mut i, |c, v| {
+                    let title = PathBuf::from(&v)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "Share".into());
+                    c.shares.push(crate::protocol::ShareRootDto { title, path: v });
+                }),
+                "--no-share" => {
+                    cfg.no_share = true;
+                    cfg.shares.clear();
                 }
                 "--static-dir" => {
                     cfg.take_str(&args, &mut i, |c, v| c.static_dir = Some(PathBuf::from(v)))
@@ -109,6 +130,10 @@ fn print_help() {
            --name <name>        display name broadcast over mDNS (default: hostname)\n\
            --http-port <port>   dashboard + WebSocket port   (default: 3000)\n\
            --p2p-port <port>    peer-to-peer TCP port        (default: 5050)\n\
+           --dav-port <port>    loopback WebDAV port for drive mapping (default: 5051)\n\
+           --share <dir>        share an extra folder over the encrypted bridge\n\
+                                (repeatable; default: your home folder / phone storage)\n\
+           --no-share           share nothing until configured on the Files page\n\
            --received-dir <dir> where inbound files are saved (default: ./received)\n\
            --static-dir <dir>   serve UI from disk instead of embedded assets\n\
            --no-open            do not auto-open the dashboard app window\n\
