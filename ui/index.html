@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Single — one room, one network</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="icon" href="assets/icon.png" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- ================= Sidebar ================= -->
+      <aside class="sidebar">
+        <div class="brand">
+          <img src="assets/logo.svg" alt="Single logo" class="brand-logo" />
+          <div>
+            <div class="brand-name">Single</div>
+            <div class="brand-sub">one room, one network</div>
+          </div>
+        </div>
+
+        <nav class="nav">
+          <button class="nav-item active" data-view="devices">
+            <span class="nav-ico">🖧</span><span>Devices</span>
+          </button>
+          <button class="nav-item" data-view="files">
+            <span class="nav-ico">🗂</span><span>Files</span>
+          </button>
+          <button class="nav-item" data-view="transfers">
+            <span class="nav-ico">⇅</span><span>Transfers</span>
+            <span id="transfer-badge" class="badge hidden">0</span>
+          </button>
+          <button class="nav-item" data-view="settings">
+            <span class="nav-ico">⚙</span><span>Settings</span>
+          </button>
+          <button class="nav-item" data-view="about">
+            <span class="nav-ico">ℹ</span><span>About</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="me-line" id="me-name">…</div>
+          <div class="me-sub" id="me-id">starting…</div>
+          <div class="me-sub">v<span id="me-version">0.1.0</span> · MIT · by L. Malakar</div>
+        </div>
+      </aside>
+
+      <!-- ================= Main ================= -->
+      <main class="main">
+        <!-- Devices -->
+        <section id="view-devices" class="view active">
+          <header class="view-head">
+            <h1>Devices</h1>
+            <div class="head-actions">
+              <button class="btn" id="btn-add-manual">+ Add by IP</button>
+              <button class="btn ghost" id="btn-refresh-devices">Refresh</button>
+            </div>
+          </header>
+          <p class="hint" id="devices-hint">
+            Devices running Single on the same Wi-Fi / Ethernet network appear here automatically.
+          </p>
+          <div id="device-grid" class="device-grid"></div>
+        </section>
+
+        <!-- Files -->
+        <section id="view-files" class="view">
+          <header class="view-head">
+            <h1>Files</h1>
+            <div class="head-actions">
+              <button class="btn" id="btn-new-folder">+ New folder</button>
+              <button class="btn" id="btn-upload">⬆ Upload</button>
+              <button class="btn ghost" id="btn-refresh-files">Refresh</button>
+            </div>
+          </header>
+          <div id="file-tabs" class="file-tabs"></div>
+          <div id="breadcrumb" class="breadcrumb"></div>
+          <div class="file-toolbar-hint hint" id="files-hint"></div>
+          <div id="file-list" class="file-list"></div>
+        </section>
+
+        <!-- Transfers -->
+        <section id="view-transfers" class="view">
+          <header class="view-head">
+            <h1>Transfers</h1>
+            <div class="head-actions">
+              <button class="btn ghost" id="btn-refresh-transfers">Refresh</button>
+            </div>
+          </header>
+          <div id="transfer-list" class="transfer-list"></div>
+        </section>
+
+        <!-- Settings -->
+        <section id="view-settings" class="view">
+          <header class="view-head"><h1>Settings</h1></header>
+          <div class="settings">
+            <label class="field">
+              <span>Device name</span>
+              <input id="set-name" type="text" placeholder="My Laptop" />
+            </label>
+            <label class="field">
+              <span>Theme</span>
+              <select id="set-theme">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Shared folder (what other devices can see)</span>
+              <div class="row">
+                <input id="set-share" type="text" readonly placeholder="…" />
+                <button class="btn" id="btn-pick-share">Choose…</button>
+              </div>
+            </label>
+            <label class="field">
+              <span>Server port</span>
+              <input id="set-port" type="number" min="1024" max="65535" />
+            </label>
+            <label class="field check" id="field-automap">
+              <input id="set-automap" type="checkbox" />
+              <span>Automatically map a network drive for each paired device (Windows)</span>
+            </label>
+            <label class="field check" id="field-rootmode">
+              <input id="set-rootmode" type="checkbox" />
+              <span>Expose per-device folders at /single (Android, needs root)</span>
+            </label>
+            <div class="row">
+              <button class="btn primary" id="btn-save-settings">Save changes</button>
+            </div>
+
+            <div class="platform-panel" id="panel-windows">
+              <h3>Windows drive mapping</h3>
+              <p class="hint">
+                One-time setup (needs a UAC confirmation): installs Single's certificate, starts the
+                WebClient service, lifts the 50&nbsp;MB WebDAV cap and opens the firewall.
+              </p>
+              <button class="btn" id="btn-drive-support">Enable drive support…</button>
+              <div id="drive-list" class="drive-list"></div>
+            </div>
+            <div class="platform-panel" id="panel-android">
+              <h3>Android root folders</h3>
+              <p class="hint">
+                Creates /single/&lt;DeviceName&gt; at the system root and bind-mounts per-device
+                folders onto them (experimental, rooted phones only).
+              </p>
+              <button class="btn" id="btn-root-setup">Setup root folders</button>
+              <ul id="root-report" class="root-report"></ul>
+            </div>
+          </div>
+        </section>
+
+        <!-- About -->
+        <section id="view-about" class="view">
+          <header class="view-head"><h1>About</h1></header>
+          <div class="about">
+            <img src="assets/logo.svg" class="about-logo" alt="logo" />
+            <h2>Single</h2>
+            <p class="tagline">Connect every device in a room into one shared space.</p>
+            <div class="about-grid" id="about-grid"></div>
+            <p class="links">
+              <a href="#" id="link-repo">GitHub — L-Malakar/Single</a> ·
+              <a href="#" id="link-license">MIT License</a>
+            </p>
+            <p class="hint">Bluetooth discovery, Linux &amp; macOS builds and more are on the roadmap.</p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- ================= Modals ================= -->
+    <div id="modal-root" class="modal-root hidden">
+      <div class="modal-backdrop" id="modal-backdrop"></div>
+      <div class="modal" id="modal-box"></div>
+    </div>
+
+    <div id="toasts" class="toasts"></div>
+
+    <script src="mock.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

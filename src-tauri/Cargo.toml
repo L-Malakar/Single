@@ -1,0 +1,32 @@
+[package]
+name = "single"
+version = "0.1.0"
+edition = "2021"
+description = "Single — connect all devices in a room into one."
+authors = ["L. Malakar"]
+license = "MIT"
+
+[lib]
+name = "single_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "Single"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+single-core = { path = "../crates/single-core" }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

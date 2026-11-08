@@ -1,8 +1,17 @@
-/target
-/received
-/received-sim
-Cargo.lock
-*.log
-/.tools
-/Single
-/Single-v*.zip
+# Rust
+/target/
+crates/*/target/
+src-tauri/target/
+
+# Tauri generated projects (recreated by Build.bat via `tauri android init`)
+src-tauri/gen/
+
+# Node
+node_modules/
+
+# Build output produced by Build.bat
+/Single/
+
+# OS cruft
+Thumbs.db
+.DS_Store
