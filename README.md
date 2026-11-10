@@ -11,7 +11,7 @@ were local.
 - **Source code:** <https://github.com/L-Malakar/Single>
 - **License:** [MIT](https://github.com/L-Malakar/Single/blob/main/LICENSE)
 - **Platforms:** Windows · Android *(Linux & macOS: roadmap)*
-- **Version:** 0.1.0
+- **Version:** 0.1.1
 
 ---
 
@@ -74,12 +74,13 @@ extra compatibility layer later.
 | Tool | Why | Get it |
 | --- | --- | --- |
 | Rust (stable) | compiles the backend | <https://rustup.rs> |
-| Node.js + npm *(optional)* | faster Tauri CLI install | <https://nodejs.org> |
+| Node.js + npm | Tauri CLI + **required for the APK** (the Android Gradle build runs the Tauri CLI through npm) | <https://nodejs.org> |
 | Inno Setup 6 *(optional)* | nicer `Single-Setup.exe` | <https://jrsoftware.org/isinfo.php> |
 | Android Studio *(for the APK)* | SDK + NDK + JDK | <https://developer.android.com/studio> |
 
 Without Node the script installs `tauri-cli` through Cargo (slower, one
-time). Without Inno Setup the script falls back to Tauri's built-in NSIS
+time) and Windows artifacts still build — but the **APK step needs Node.js**.
+Without Inno Setup the script falls back to Tauri's built-in NSIS
 installer. Without Android Studio you still get all Windows artifacts.
 
 ### Build
@@ -90,7 +91,7 @@ Build.bat
 ```
 
 The script does everything: refreshes icons from `logo.svg`, builds the
-Windows exe, builds `Single-Setup-v0.1.0.exe`, packs the portable zip, and —
+Windows exe, builds `Single-Setup-v0.1.1.exe`, packs the portable zip, and —
 when an Android SDK is present — generates the Android project on first run
 and builds the APK.
 
@@ -100,20 +101,22 @@ and builds the APK.
 Single\
 ├── Windows\
 │   ├── Single.exe                  portable, just run it
-│   ├── Single-Setup-v0.1.0.exe     installer (Inno Setup or NSIS)
-│   └── Single-v0.1.0.zip           portable zip
+│   ├── Single-Setup-v0.1.1.exe     installer (Inno Setup or NSIS)
+│   └── Single-v0.1.1.zip           portable zip
 └── Android\
-    └── Single-v0.1.0.apk           debug-signed, installs directly
+    └── Single-v0.1.1.apk           debug-signed, installs directly
 ```
 
 ### Use your own logo
 
-Replace **`logo.svg`** (square artwork, transparent background works best)
-and run `Build.bat` again — every app icon is regenerated from that file.
+All app icons are generated from **`logo.svg`** in the repo root (square
+artwork, transparent background works best). Replace it and run `Build.bat`
+again — every icon, including the Android launcher icons, is regenerated
+from that file.
 
 ## Install & use
 
-**Windows** — run `Single-Setup-v0.1.0.exe` (or just `Single.exe`). In
+**Windows** — run `Single-Setup-v0.1.1.exe` (or just `Single.exe`). In
 *Settings → Enable drive support* accept the one-time UAC prompt: it
 installs Single's certificate, starts the WebClient service, lifts the
 50 MB WebDAV cap, and opens the firewall. Then map paired devices as drives
@@ -147,8 +150,34 @@ app's private storage.
   and the PIN — a device that was never approved cannot read a byte.
 - All paths are sandboxed inside the shared folder (`..`-traversal rejected).
 - Unpairing revokes the token on both devices instantly.
-- Known v0.1.0 limits: the WebDAV token travels in the URL-mapping (like any
+- Known v0.1.1 limits: the WebDAV token travels in the URL-mapping (like any
   drive mapping), and drives must be re-mapped if a device's IP changes.
+
+## Troubleshooting
+
+### `A problem occurred starting process 'command 'npm.bat''` (Android)
+
+The Android build has two layers: `Build.bat` → Gradle → back into the
+Tauri CLI. When the Android project was generated via `npx`, the generated
+Gradle task (`src-tauri/gen/android/buildSrc/.../BuildTask.kt`) launches the
+Tauri CLI **through npm**, so Gradle must be able to start `npm.bat`.
+It fails when npm is missing from the PATH that the Gradle *daemon* sees:
+
+1. **Install Node.js LTS** from <https://nodejs.org> (if `npm --version`
+   fails in a fresh terminal).
+2. **Open a NEW terminal** (or reboot) — running shells and Gradle daemons
+   keep the PATH they were started with. `Build.bat` now runs
+   `gradlew --stop` before building, which retires stale daemons
+   automatically; rebooting does the same.
+3. Verify: `where npm` must print a path, then run `Build.bat` again.
+4. Still stuck? Delete `src-tauriin/android` → run `Build.bat`; the
+4. Still stuck? Delete `src-tauri\gen\android` and run `Build.bat`; the
+
+### Windows build is fine, only the APK fails
+
+That is expected whenever a prerequisite of the Android toolchain is
+missing (NDK, licenses, Node). All Windows artifacts under `Single\Windows\`
+are already finished — fix the reported cause and re-run `Build.bat`.
 
 ## Roadmap
 
