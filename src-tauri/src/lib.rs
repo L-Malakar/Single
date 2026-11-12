@@ -96,6 +96,24 @@ pub fn run() {
             win_drive_support,
             android_root_setup,
         ])
+        .on_page_load(|webview, payload| {
+            // Windows startup: the splash window is visible first and the
+            // main window starts hidden (see tauri.windows.conf.json). Once
+            // the real UI has finished loading, show it and close the splash.
+            // On Android the main window is visible from the start and there
+            // is no splash window, so both lookups below simply no-op.
+            if payload.event() == tauri::webview::PageLoadEvent::Finished
+                && webview.label() == "main"
+            {
+                if let Some(main_window) = webview.get_webview_window("main") {
+                    let _ = main_window.show();
+                    let _ = main_window.set_focus();
+                }
+                if let Some(splash) = webview.get_webview_window("splashscreen") {
+                    let _ = splash.close();
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

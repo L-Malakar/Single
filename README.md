@@ -11,7 +11,7 @@ were local.
 - **Source code:** <https://github.com/L-Malakar/Single>
 - **License:** [MIT](https://github.com/L-Malakar/Single/blob/main/LICENSE)
 - **Platforms:** Windows · Android *(Linux & macOS: roadmap)*
-- **Version:** 0.1.2
+- **Version:** 0.1.3
 
 ---
 
@@ -83,6 +83,11 @@ time) and Windows artifacts still build — but the **APK step needs Node.js**.
 Without Inno Setup the script falls back to Tauri's built-in NSIS
 installer. Without Android Studio you still get all Windows artifacts.
 
+The repo root contains a small `package.json` with a `"tauri"` script —
+that is what the Android Gradle build calls back into (`npm run tauri …`),
+and `Build.bat` runs `npm install` for you so the CLI lands in
+`node_modules`. Keep the file next to `Build.bat`.
+
 ### Build
 
 ```bat
@@ -90,10 +95,10 @@ installer. Without Android Studio you still get all Windows artifacts.
 Build.bat
 ```
 
-The script does everything: refreshes icons from `logo.svg`, builds the
-Windows exe, builds `Single-Setup-v0.1.2.exe`, packs the portable zip, and —
-when an Android SDK is present — generates the Android project on first run
-and builds the APK.
+The script does everything: installs the local Tauri CLI (`npm install`),
+refreshes icons from `logo.svg`, builds the Windows exe, builds
+`Single-Setup-v0.1.3.exe`, packs the portable zip, and — when an Android SDK
+is present — generates the Android project on first run and builds the APK.
 
 ### Artifacts
 
@@ -101,22 +106,28 @@ and builds the APK.
 Single\
 ├── Windows\
 │   ├── Single.exe                  portable, just run it
-│   ├── Single-Setup-v0.1.2.exe     installer (Inno Setup or NSIS)
-│   └── Single-v0.1.2.zip           portable zip
+│   ├── Single-Setup-v0.1.3.exe     installer (Inno Setup or NSIS)
+│   └── Single-v0.1.3.zip           portable zip
 └── Android\
-    └── Single-v0.1.2.apk           debug-signed, installs directly
+    └── Single-v0.1.3.apk           debug-signed, installs directly
 ```
 
-### Use your own logo
+## Where the logo appears
 
-All app icons are generated from **`logo.svg`** in the repo root (square
-artwork, transparent background works best). Replace it and run `Build.bat`
-again — every icon, including the Android launcher icons, is regenerated
-from that file.
+Every logo is generated from **`logo.svg`** in the repo root — replace the
+file and run `Build.bat` again to refresh all of them:
+
+- desktop + taskbar icon (embedded into `Single.exe`),
+- the **startup splash screen** (shown instantly, closes when the UI is
+  ready — Windows only; see `ui/splash.html` and `tauri.windows.conf.json`),
+- the NSIS installer **and uninstaller** executables plus the wizard header
+  (`icons/header.bmp`, regenerated each build),
+- the Inno Setup installer (setup icon + Add/Remove-Programs icon),
+- the Android launcher icons (all densities).
 
 ## Install & use
 
-**Windows** — run `Single-Setup-v0.1.2.exe` (or just `Single.exe`). In
+**Windows** — run `Single-Setup-v0.1.3.exe` (or just `Single.exe`). In
 *Settings → Enable drive support* accept the one-time UAC prompt: it
 installs Single's certificate, starts the WebClient service, lifts the
 50 MB WebDAV cap, and opens the firewall. Then map paired devices as drives
@@ -150,7 +161,7 @@ app's private storage.
   and the PIN — a device that was never approved cannot read a byte.
 - All paths are sandboxed inside the shared folder (`..`-traversal rejected).
 - Unpairing revokes the token on both devices instantly.
-- Known v0.1.2 limits: the WebDAV token travels in the URL-mapping (like any
+- Known v0.1.3 limits: the WebDAV token travels in the URL-mapping (like any
   drive mapping), and drives must be re-mapped if a device's IP changes.
 
 ## Troubleshooting
@@ -166,12 +177,42 @@ It fails when npm is missing from the PATH that the Gradle *daemon* sees:
 1. **Install Node.js LTS** from <https://nodejs.org> (if `npm --version`
    fails in a fresh terminal).
 2. **Open a NEW terminal** (or reboot) — running shells and Gradle daemons
-   keep the PATH they were started with. `Build.bat` now runs
-   `gradlew --stop` before building, which retires stale daemons
-   automatically; rebooting does the same.
+   keep the PATH they were started with. `Build.bat` runs `gradlew --stop`
+   before building, which retires stale daemons automatically.
 3. Verify: `where npm` must print a path, then run `Build.bat` again.
-4. Still stuck? Delete `src-tauriin/android` → run `Build.bat`; the
 4. Still stuck? Delete `src-tauri\gen\android` and run `Build.bat`; the
+   whole Android project is regenerated from scratch.
+
+### `npm error Missing script: "tauri"` (Android)
+
+Gradle calls the Tauri CLI with `npm run tauri …` **in the project root**.
+That requires a root `package.json` containing the `"tauri"` script and the
+CLI installed in `node_modules`. This repo ships both; `Build.bat` runs
+`npm install` automatically before the Android step.
+
+1. Make sure `package.json` (repo root, next to `Build.bat`) is present.
+2. Run `npm install` in the project root — internet + Node.js LTS needed.
+3. Verify: `npm run tauri --version` must print a version.
+4. Run `Build.bat` again. If it still fails, delete `src-tauri\gen\android`
+   so Gradle regenerates the project.
+
+### Kotlin daemon crash — `different roots` / `Could not close incremental caches` (Android)
+
+The Tauri Android library sources live inside the Cargo registry (usually
+`C:\Users\<you>\.cargo\registry\...`) while the project sits on another
+drive (for example `D:\Webproject\Single-main`). Kotlin's *incremental*
+compiler cannot store relative paths across two Windows drive letters and
+the whole Kotlin daemon dies.
+
+`Build.bat` prevents this automatically: it appends
+`kotlin.incremental=false` to `src-tauri\gen\android\gradle.properties`,
+compiles Kotlin in-process, and clears stale caches next to the Tauri
+sources. Manual fix, if you build Gradle yourself:
+
+1. Add `kotlin.incremental=false` to `src-tauri\gen\android\gradle.properties`.
+2. Delete `C:\Users\<you>\.cargo\registry\src\...\tauri-<version>\mobile\android\build`.
+3. Run the build again. (Alternatively keep the project and Cargo on the
+   same drive — see [tauri issue #10876](https://github.com/tauri-apps/tauri/issues/10876).)
 
 ### `memory allocation of ... bytes failed` (rustc dies mid-build)
 

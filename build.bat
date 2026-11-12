@@ -3,13 +3,13 @@ rem ============================================================
 rem  Single build script  (Windows)
 rem  Produces:
 rem    Single\Windows\Single.exe
-rem    Single\Windows\Single-Setup-v0.1.2.exe   (Inno Setup, or NSIS fallback)
-rem    Single\Windows\Single-v0.1.2.zip         (portable)
-rem    Single\Android\Single-v0.1.2.apk         (needs Android Studio + Node.js)
+rem    Single\Windows\Single-Setup-v0.1.3.exe   (Inno Setup, or NSIS fallback)
+rem    Single\Windows\Single-v0.1.3.zip         (portable)
+rem    Single\Android\Single-v0.1.3.apk         (needs Android Studio + Node.js)
 rem ============================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
-set VERSION=0.1.2
+set VERSION=0.1.3
 set OUT=Single
 set TAURI_ARGS=
 
@@ -68,6 +68,22 @@ if "%TAURI_CMD%"=="cargo" (
         echo        Installing tauri-cli via cargo - this can take a few minutes...
         cargo install tauri-cli --version "^2" --locked
         if errorlevel 1 goto :fail
+    )
+)
+
+rem ------------------------------------------------ local Tauri CLI for Gradle's callback
+rem      The generated Android Gradle project calls the Tauri CLI back with
+rem      "npm run tauri ..." (src-tauri\gen\android\buildSrc\...\BuildTask.kt).
+rem      That needs the root package.json "tauri" script plus the CLI inside
+rem      node_modules - "npm install" provides both (also makes npx use the
+rem      pinned local CLI instead of re-fetching).
+if "%TAURI_CMD%"=="npx" (
+    if not exist "node_modules\.bin\tauri.cmd" (
+        echo        Installing the Tauri CLI locally ^(npm install^)...
+        call npm install --no-audit --no-fund
+        if errorlevel 1 (
+            echo [WARN] npm install failed - see the Android step notes below.
+        )
     )
 )
 
@@ -161,6 +177,19 @@ if defined SDK (
             )
         )
 
+        rem ---- The Gradle callback runs "npm run tauri" from the project
+        rem      root, which resolves the CLI from node_modules. If the
+        rem      install above failed, skip the APK with a clear message
+        rem      instead of dying on "npm error Missing script: tauri".
+        if "%TAURI_CMD%"=="npx" if not exist "node_modules\.bin\tauri.cmd" (
+            echo [WARN] node_modules\.bin\tauri.cmd is missing - skipping the APK.
+            echo        The Android build calls "npm run tauri" in the project root,
+            echo        which needs the root package.json and a successful
+            echo        "npm install". Fix: run "npm install" in this folder
+            echo        ^(internet + Node.js LTS required^), then Build.bat again.
+            goto :skip_android
+        )
+
         rem ---- Stop stale Gradle daemons: one started before Node.js was
         rem      installed keeps the old PATH and cannot launch npm.bat,
         rem      which surfaces as: A problem occurred starting process.
@@ -179,6 +208,37 @@ if defined SDK (
             echo        Refreshing the Android launcher icons from logo.svg...
             call :tauri icon logo.svg >nul 2>&1
         )
+        rem ---- Disable Kotlin incremental compilation. The Tauri Android
+        rem      library sources live inside the Cargo registry (usually C:\)
+        rem      while the project can sit on another drive (e.g. D:\). When
+        rem      both are on different drives Kotlin's incremental compiler
+        rem      dies with "this and base files have different roots" /
+        rem      "Could not close incremental caches" (tauri issue #10876).
+        set "GPROPS=src-tauri\gen\android\gradle.properties"
+        if exist "!GPROPS!" (
+            findstr /i /c:"kotlin.incremental=false" "!GPROPS!" >nul 2>&1
+            if errorlevel 1 (
+                echo        Disabling Kotlin incremental compilation ^(cross-drive fix^)...
+                >>"!GPROPS!" echo.
+                >>"!GPROPS!" echo kotlin.incremental=false
+            )
+            findstr /i /c:"kotlin.compiler.execution.strategy=in-process" "!GPROPS!" >nul 2>&1
+            if errorlevel 1 >>"!GPROPS!" echo kotlin.compiler.execution.strategy=in-process
+        )
+
+        rem ---- Remove stale Kotlin caches next to the Tauri Android sources
+        rem      in the Cargo registry (leftovers from earlier failed builds).
+        for /d %%D in ("%USERPROFILE%\.cargo\registry\src\*\tauri-2*") do (
+            if exist "%%D\mobile\android\build" rmdir /s /q "%%D\mobile\android\build"
+        )
+
+        rem ---- Export the detected SDK/NDK so the Tauri CLI does not have to
+        rem      guess ^(silences "ANDROID_HOME not set" and makes Gradle and
+        rem      the CLI see exactly the same tools^).
+        set "ANDROID_HOME=!SDK!"
+        set "ANDROID_SDK_ROOT=!SDK!"
+        set "NDK_HOME=!NDK_DIR!"
+
         echo        Signing release APK with the debug key for easy installs...
         powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\sign-android-release.ps1"
         echo        Building APK ^(aarch64^)...
@@ -243,7 +303,22 @@ echo        2. Missing NDK or unaccepted SDK licenses
 echo           Open Android Studio ^> SDK Manager, install an NDK and accept
 echo           the license agreements, then run Build.bat again.
 echo.
-echo        3. Still failing
+echo        3. "npm error Missing script: tauri"
+echo           The Gradle callback needs the root package.json "tauri" script
+echo           and the CLI inside node_modules. Build.bat runs "npm install"
+echo           for you. Fix: check internet + Node.js, run "npm install" in
+echo           the project root, verify with "npm run tauri --version",
+echo           then run Build.bat again.
+echo.
+echo        4. Kotlin daemon crash, "different roots", "Could not close
+echo           incremental caches"
+echo           Your project and the Cargo cache sit on different drives
+echo           ^(e.g. project on D:, Cargo on C:^). Build.bat disables Kotlin
+echo           incremental compilation automatically. If it still fails, add
+echo           "kotlin.incremental=false" to src-tauri\gen\android\gradle.properties
+echo           by hand, delete src-tauri\gen\android\app\build and retry.
+echo.
+echo        5. Still failing
 echo           Delete the folder src-tauri\gen\android and run Build.bat again;
 echo           the whole Android project is regenerated from scratch.
 echo.
