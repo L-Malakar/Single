@@ -11,7 +11,7 @@ were local.
 - **Source code:** <https://github.com/L-Malakar/Single>
 - **License:** [MIT](https://github.com/L-Malakar/Single/blob/main/LICENSE)
 - **Platforms:** Windows · Android *(Linux & macOS: roadmap)*
-- **Version:** 0.1.3
+- **Version:** 0.1.4
 
 ---
 
@@ -97,7 +97,7 @@ Build.bat
 
 The script does everything: installs the local Tauri CLI (`npm install`),
 refreshes icons from `logo.svg`, builds the Windows exe, builds
-`Single-Setup-v0.1.3.exe`, packs the portable zip, and — when an Android SDK
+`Single-Setup-v0.1.4.exe`, packs the portable zip, and — when an Android SDK
 is present — generates the Android project on first run and builds the APK.
 
 ### Artifacts
@@ -106,10 +106,10 @@ is present — generates the Android project on first run and builds the APK.
 Single\
 ├── Windows\
 │   ├── Single.exe                  portable, just run it
-│   ├── Single-Setup-v0.1.3.exe     installer (Inno Setup or NSIS)
-│   └── Single-v0.1.3.zip           portable zip
+│   ├── Single-Setup-v0.1.4.exe     installer (Inno Setup or NSIS)
+│   └── Single-v0.1.4.zip           portable zip
 └── Android\
-    └── Single-v0.1.3.apk           debug-signed, installs directly
+    └── Single-v0.1.4.apk           debug-signed, installs directly
 ```
 
 ## Where the logo appears
@@ -125,9 +125,38 @@ file and run `Build.bat` again to refresh all of them:
 - the Inno Setup installer (setup icon + Add/Remove-Programs icon),
 - the Android launcher icons (all densities).
 
+## One app, two experiences
+
+Single ships one codebase with a UI that adapts to the device it runs on —
+no compromise layout shared between mouse and thumb:
+
+**Windows / desktop (window ≥ 761 px wide)**
+
+- Sidebar navigation with crisp SVG icons (no emojis that render differently
+  across platforms).
+- Double-click folders in *Files*; hover states everywhere.
+- Consistent icon buttons (download / rename / delete) with tooltips.
+
+**Android / mobile (narrow or touch screen)**
+
+- A dedicated **top bar** (logo + this device's name) and a **bottom tab
+  bar** with five large touch targets — thumb-friendly navigation.
+- **Single tap** opens folders; the date column hides; row actions become
+  icon buttons sized for fingers.
+- Confirmation dialogs and the rename / new-folder prompts slide up as
+  **bottom sheets** instead of native browser popups (which are unreliable
+  inside the Android WebView anyway).
+- Safe-area aware (edge-to-edge phones), status-bar color follows the
+  dark/light theme, and the accent color matches the logo blue.
+
+**Long-press freeze fixed.** Holding an image (or any content) used to pop
+up the Android WebView's native callout/drag preview on top of the app and
+freeze the screen. v0.1.4 disables image dragging, the touch callout and
+text selection UI-wide (typing and the pairing PIN still work as before).
+
 ## Install & use
 
-**Windows** — run `Single-Setup-v0.1.3.exe` (or just `Single.exe`). In
+**Windows** — run `Single-Setup-v0.1.4.exe` (or just `Single.exe`). In
 *Settings → Enable drive support* accept the one-time UAC prompt: it
 installs Single's certificate, starts the WebClient service, lifts the
 50 MB WebDAV cap, and opens the firewall. Then map paired devices as drives
@@ -161,7 +190,7 @@ app's private storage.
   and the PIN — a device that was never approved cannot read a byte.
 - All paths are sandboxed inside the shared folder (`..`-traversal rejected).
 - Unpairing revokes the token on both devices instantly.
-- Known v0.1.3 limits: the WebDAV token travels in the URL-mapping (like any
+- Known v0.1.4 limits: the WebDAV token travels in the URL-mapping (like any
   drive mapping), and drives must be re-mapped if a device's IP changes.
 
 ## Troubleshooting

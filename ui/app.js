@@ -44,6 +44,20 @@ const invoke = (cmd, args = {}) => T.core.invoke(cmd, args);
 const listen = (ev, cb) => T.event.listen(ev, cb);
 const dialog = () => T.dialog;
 
+/* ------------------------------------------------------------ device mode */
+
+/* Mobile UX (bottom tabs, single-tap) vs desktop UX (sidebar, double-click).
+   The layout itself is CSS-driven (max-width: 760px); the "mobile" class on
+   <body> also switches behaviors. The UA/touch hint applies instantly, the
+   backend platform confirms it once get_app_info returns. */
+const IS_MOBILE =
+  /Android|iPhone|iPad|Mobi/i.test(navigator.userAgent) ||
+  window.matchMedia("(pointer: coarse)").matches;
+if (IS_MOBILE) document.body.classList.add("mobile");
+
+/* tiny inline icon helper - references the SVG sprite in index.html */
+const ico = (name) => `<svg class="ic" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
+
 /* ------------------------------------------------------------------- state */
 
 const state = {
@@ -72,8 +86,65 @@ function openModal(html) {
 function closeModal() {
   $("#modal-root").classList.add("hidden");
   $("#modal-box").innerHTML = "";
+  if (modalResolver) { const r = modalResolver; modalResolver = null; r(null); }
 }
 $("#modal-backdrop").addEventListener("click", closeModal);
+
+/* Long-press guards. On Android, holding an image pops up the WebView's
+   native callout / drag preview on top of the app and the screen freezes
+   until it is dismissed. Disable all native long-press behavior. */
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+document.addEventListener("dragstart", (e) => e.preventDefault());
+document.addEventListener("selectstart", (e) => {
+  if (e.target && e.target.tagName === "IMG") e.preventDefault();
+});
+
+/* Promise-based dialogs. window.prompt/confirm are unreliable inside the
+   Android WebView and look out of place - use themed modals instead. */
+let modalResolver = null;
+
+function uiConfirm({ title, body, okText = "OK", cancelText = "Cancel", danger = false }) {
+  return new Promise((resolve) => {
+    modalResolver = (v) => { modalResolver = null; resolve(v); };
+    openModal(`
+      <h2>${esc(title)}</h2>
+      ${body ? `<p>${body}</p>` : ""}
+      <div class="row-end">
+        <button class="btn ghost" id="dlg-cancel">${esc(cancelText)}</button>
+        <button class="btn ${danger ? "danger" : "primary"}" id="dlg-ok">${esc(okText)}</button>
+      </div>`);
+    $("#dlg-cancel").addEventListener("click", closeModal);
+    $("#dlg-ok").addEventListener("click", () => {
+      if (modalResolver) { const r = modalResolver; modalResolver = null; r(true); }
+      closeModal();
+    });
+  });
+}
+
+function uiPrompt({ title, label, value = "", placeholder = "", okText = "OK" }) {
+  return new Promise((resolve) => {
+    modalResolver = (v) => { modalResolver = null; resolve(v); };
+    openModal(`
+      <h2>${esc(title)}</h2>
+      <div class="field"><span>${esc(label)}</span>
+        <input id="dlg-input" type="text" value="${esc(value)}" placeholder="${esc(placeholder)}" />
+      </div>
+      <div class="row-end">
+        <button class="btn ghost" id="dlg-cancel">Cancel</button>
+        <button class="btn primary" id="dlg-ok">${esc(okText)}</button>
+      </div>`);
+    const input = $("#dlg-input");
+    $("#dlg-cancel").addEventListener("click", closeModal);
+    $("#dlg-ok").addEventListener("click", () => {
+      const v = input.value.trim();
+      if (modalResolver) { const r = modalResolver; modalResolver = null; r(v || null); }
+      closeModal();
+    });
+    input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") $("#dlg-ok").click(); });
+    input.focus();
+    input.select();
+  });
+}
 
 /* -------------------------------------------------------------------- views */
 
@@ -81,6 +152,8 @@ function switchView(name) {
   state.view = name;
   $$(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === "view-" + name));
+  const scroller = $(".main");
+  if (scroller) scroller.scrollTop = 0;
   if (name === "devices") renderDevices();
   if (name === "files") { renderFileTabs(); refreshFiles(); }
   if (name === "transfers") renderTransfers();
@@ -116,14 +189,14 @@ function renderDevices() {
     const dl = d.drive_letter ? `<span class="pill">drive ${esc(d.drive_letter)}:</span>` : "";
     let actions = "";
     if (!d.paired) {
-      actions = `<button class="btn small primary" data-act="pair" data-id="${esc(d.id)}" ${online ? "" : "disabled"}>Pair</button>`;
+      actions = `<button class="btn small primary" data-act="pair" data-id="${esc(d.id)}" ${online ? "" : "disabled"}>${ico("link")}<span>Pair</span></button>`;
     } else {
       actions = `
-        <button class="btn small" data-act="browse" data-id="${esc(d.id)}">Browse</button>
+        <button class="btn small" data-act="browse" data-id="${esc(d.id)}">${ico("folder")}<span>Browse</span></button>
         ${state.info && state.info.platform === "windows"
-          ? `<button class="btn small" data-act="map" data-id="${esc(d.id)}" ${online ? "" : "disabled"}>${d.drive_letter ? "Re-map drive" : "Map drive"}</button>`
+          ? `<button class="btn small" data-act="map" data-id="${esc(d.id)}" ${online ? "" : "disabled"}>${ico("drive")}<span>${d.drive_letter ? "Re-map" : "Map drive"}</span></button>`
           : ""}
-        <button class="btn small danger" data-act="unpair" data-id="${esc(d.id)}">Unpair</button>`;
+        <button class="btn small danger" data-act="unpair" data-id="${esc(d.id)}">${ico("x")}<span>Unpair</span></button>`;
     }
     return `<div class="device-card">
       <div class="device-top">
@@ -152,11 +225,16 @@ async function deviceAction(act, id) {
     } else if (act === "pair") {
       await startPairFlow(id, dev?.name ?? "device");
     } else if (act === "unpair") {
-      if (confirm(`Unpair from "${dev?.name}"?`)) {
-        await invoke("unpair", { peerId: id });
-        toast("Device removed");
-        refreshDevices();
-      }
+      const ok = await uiConfirm({
+        title: "Unpair device",
+        body: `Remove <b>${esc(dev?.name ?? "this device")}</b>? The shared token is revoked on both devices.`,
+        okText: "Unpair",
+        danger: true,
+      });
+      if (!ok) return;
+      await invoke("unpair", { peerId: id });
+      toast("Device removed");
+      refreshDevices();
     } else if (act === "map") {
       const letter = await invoke("win_map_drive", { peerId: id });
       toast(`Mapped as drive ${letter}:`);
@@ -298,10 +376,14 @@ function renderFiles() {
   const label = state.files.peer
     ? (state.devices.find((d) => d.id === state.files.peer)?.name ?? "device")
     : "This device";
+  const openHint = document.body.classList.contains("mobile")
+    ? "Tap a folder to open it."
+    : "Double-click a folder to open it.";
   $("#files-hint").textContent =
-    state.files.peer
+    (state.files.peer
       ? `Browsing the shared folder of ${label}. Downloads go to your Downloads folder.`
-      : `This is the folder other devices can see. In Settings you can share a different folder.`;
+      : `This is the folder other devices can see. In Settings you can share a different folder.`)
+    + ` ${openHint}`;
 
   // breadcrumb
   const parts = path ? path.split("/") : [];
@@ -320,17 +402,15 @@ function renderFiles() {
 
   const rows = state.files.entries.map((e) => {
     const isLocal = state.files.peer === null;
-    const ico = e.is_dir ? "📁" : "📄";
-    const click = e.is_dir ? "clickable" : "";
-    return `<div class="file-row ${click}" data-path="${esc(e.path)}" data-dir="${e.is_dir ? 1 : 0}">
-      <div class="file-ico">${ico}</div>
+    return `<div class="file-row ${e.is_dir ? "clickable" : ""}" data-path="${esc(e.path)}" data-dir="${e.is_dir ? 1 : 0}">
+      <div class="file-ico ${e.is_dir ? "is-dir" : ""}">${ico(e.is_dir ? "folder" : "file")}</div>
       <div class="file-name">${esc(e.name)}</div>
-      <div class="file-size">${e.is_dir ? "—" : fmtSize(e.size)}</div>
+      <div class="file-size">${e.is_dir ? "" : fmtSize(e.size)}</div>
       <div class="file-date">${fmtDate(e.mtime)}</div>
       <div class="file-actions">
-        ${!isLocal && !e.is_dir ? `<button class="btn small" data-fa="download">⬇ Download</button>` : ""}
-        <button class="btn small" data-fa="rename">Rename</button>
-        <button class="btn small danger" data-fa="delete">Delete</button>
+        ${!isLocal && !e.is_dir ? `<button class="btn small icobtn" data-fa="download" title="Download" aria-label="Download">${ico("download")}</button>` : ""}
+        <button class="btn small icobtn" data-fa="rename" title="Rename" aria-label="Rename">${ico("edit")}</button>
+        <button class="btn small danger icobtn" data-fa="delete" title="Delete" aria-label="Delete">${ico("trash")}</button>
       </div>
     </div>`;
   });
@@ -338,14 +418,17 @@ function renderFiles() {
     ? rows.join("")
     : `<div class="empty">Empty folder</div>`;
 
-  $$("#file-list .file-row.clickable").forEach((row) =>
-    row.addEventListener("dblclick", () => {
-      if (row.dataset.dir === "1") {
-        const key = state.files.peer ?? "local";
-        state.files.paths[key] = row.dataset.path;
-        refreshFiles();
-      }
-    }));
+  const openDir = (row) => {
+    if (row.dataset.dir === "1") {
+      const key = state.files.peer ?? "local";
+      state.files.paths[key] = row.dataset.path;
+      refreshFiles();
+    }
+  };
+  $$("#file-list .file-row.clickable").forEach((row) => {
+    if (document.body.classList.contains("mobile")) row.addEventListener("click", () => openDir(row));
+    else row.addEventListener("dblclick", () => openDir(row));
+  });
   $$("#file-list .btn").forEach((b) =>
     b.addEventListener("click", (ev) => {
       ev.stopPropagation();
@@ -362,12 +445,23 @@ async function fileAction(act, path, isDir) {
       toast("Download started");
       updateBadge();
     } else if (act === "delete") {
-      if (!confirm(`Delete "${path}"?`)) return;
+      const ok = await uiConfirm({
+        title: "Delete",
+        body: `Delete <b>${esc(path.split("/").pop())}</b>? This cannot be undone.`,
+        okText: "Delete",
+        danger: true,
+      });
+      if (!ok) return;
       if (peer) await invoke("peer_delete", { peerId: peer, path });
       else await invoke("local_delete", { path });
       refreshFiles();
     } else if (act === "rename") {
-      const dest = prompt("New name / path:", path.split("/").pop());
+      const dest = await uiPrompt({
+        title: "Rename",
+        label: "New name",
+        value: path.split("/").pop(),
+        okText: "Rename",
+      });
       if (!dest) return;
       const destPath = path.includes("/")
         ? path.slice(0, path.lastIndexOf("/") + 1) + dest
@@ -380,7 +474,12 @@ async function fileAction(act, path, isDir) {
 }
 
 $("#btn-new-folder").addEventListener("click", async () => {
-  const name = prompt("Folder name:");
+  const name = await uiPrompt({
+    title: "New folder",
+    label: "Folder name",
+    placeholder: "My folder",
+    okText: "Create",
+  });
   if (!name) return;
   const path = currentFilesPath() ? currentFilesPath() + "/" + name : name;
   try {
@@ -414,9 +513,10 @@ $("#btn-refresh-files").addEventListener("click", refreshFiles);
 function updateBadge() {
   invoke("list_transfers").then((list) => {
     const active = list.filter((t) => t.state === "active").length;
-    const badge = $("#transfer-badge");
-    badge.classList.toggle("hidden", active === 0);
-    badge.textContent = String(active);
+    $$(".transfer-badge").forEach((badge) => {
+      badge.classList.toggle("hidden", active === 0);
+      badge.textContent = String(active);
+    });
   }).catch(() => {});
 }
 
@@ -426,11 +526,11 @@ async function renderTransfers() {
     $("#transfer-list").innerHTML = list.length
       ? list.map((t) => {
           const pct = t.total > 0 ? Math.min(100, Math.round((t.done / t.total) * 100)) : (t.state === "done" ? 100 : 0);
-          const dir = t.kind === "upload" ? "→" : "←";
+          const dir = t.kind === "upload" ? ico("upload") : ico("download");
           return `<div class="transfer-item">
             <div class="transfer-top">
               <div>
-                <div class="transfer-name">${dir} ${esc(t.name)}</div>
+                <div class="transfer-name">${dir}<span>${esc(t.name)}</span></div>
                 <div class="transfer-sub">${esc(t.peer_name)} · ${fmtSize(t.done)} / ${fmtSize(t.total)}</div>
               </div>
               <span class="state-badge ${t.state}">${esc(t.state)}</span>
@@ -568,7 +668,10 @@ $("#btn-add-manual").addEventListener("click", () => {
 $("#btn-refresh-devices").addEventListener("click", refreshDevices);
 
 function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme === "light" ? "light" : "dark";
+  const light = theme === "light";
+  document.documentElement.dataset.theme = light ? "light" : "dark";
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute("content", light ? "#f4f6fa" : "#12141a");
 }
 
 /* ------------------------------------------------------------------- boot */
@@ -580,10 +683,12 @@ async function boot() {
     $("#me-name").textContent = state.info.name;
     $("#me-id").textContent = `ID ${state.info.id.slice(0, 8)}… · :${state.info.port}`;
     $("#me-version").textContent = state.info.version;
+    $("#top-me").textContent = state.info.name;
   } catch (e) {
     $("#me-id").textContent = "not connected to backend";
     toast(String(e), true);
   }
+  if (state.info?.platform === "android") document.body.classList.add("mobile");
   refreshDevices();
   updateBadge();
   setInterval(updateBadge, 4000);
