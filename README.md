@@ -11,7 +11,11 @@ were local.
 - **Source code:** <https://github.com/L-Malakar/Single>
 - **License:** [MIT](https://github.com/L-Malakar/Single/blob/main/LICENSE)
 - **Platforms:** Windows · Android *(Linux & macOS: roadmap)*
+<<<<<<< HEAD
 - **Version:** 0.1.0
+=======
+- **Version:** 0.1.2
+>>>>>>> e87b726b12d4762f68ebf0cba47f2ef7fa1f21b4
 
 ---
 
@@ -74,12 +78,21 @@ extra compatibility layer later.
 | Tool | Why | Get it |
 | --- | --- | --- |
 | Rust (stable) | compiles the backend | <https://rustup.rs> |
+<<<<<<< HEAD
 | Node.js + npm *(optional)* | faster Tauri CLI install | <https://nodejs.org> |
+=======
+| Node.js + npm | Tauri CLI + **required for the APK** (the Android Gradle build runs the Tauri CLI through npm) | <https://nodejs.org> |
+>>>>>>> e87b726b12d4762f68ebf0cba47f2ef7fa1f21b4
 | Inno Setup 6 *(optional)* | nicer `Single-Setup.exe` | <https://jrsoftware.org/isinfo.php> |
 | Android Studio *(for the APK)* | SDK + NDK + JDK | <https://developer.android.com/studio> |
 
 Without Node the script installs `tauri-cli` through Cargo (slower, one
+<<<<<<< HEAD
 time). Without Inno Setup the script falls back to Tauri's built-in NSIS
+=======
+time) and Windows artifacts still build — but the **APK step needs Node.js**.
+Without Inno Setup the script falls back to Tauri's built-in NSIS
+>>>>>>> e87b726b12d4762f68ebf0cba47f2ef7fa1f21b4
 installer. Without Android Studio you still get all Windows artifacts.
 
 ### Build
@@ -90,7 +103,11 @@ Build.bat
 ```
 
 The script does everything: refreshes icons from `logo.svg`, builds the
+<<<<<<< HEAD
 Windows exe, builds `Single-Setup-v0.1.0.exe`, packs the portable zip, and —
+=======
+Windows exe, builds `Single-Setup-v0.1.2.exe`, packs the portable zip, and —
+>>>>>>> e87b726b12d4762f68ebf0cba47f2ef7fa1f21b4
 when an Android SDK is present — generates the Android project on first run
 and builds the APK.
 
@@ -100,20 +117,38 @@ and builds the APK.
 Single\
 ├── Windows\
 │   ├── Single.exe                  portable, just run it
+<<<<<<< HEAD
 │   ├── Single-Setup-v0.1.0.exe     installer (Inno Setup or NSIS)
 │   └── Single-v0.1.0.zip           portable zip
 └── Android\
     └── Single-v0.1.0.apk           debug-signed, installs directly
+=======
+│   ├── Single-Setup-v0.1.2.exe     installer (Inno Setup or NSIS)
+│   └── Single-v0.1.2.zip           portable zip
+└── Android\
+    └── Single-v0.1.2.apk           debug-signed, installs directly
+>>>>>>> e87b726b12d4762f68ebf0cba47f2ef7fa1f21b4
 ```
 
 ### Use your own logo
 
+<<<<<<< HEAD
 Replace **`logo.svg`** (square artwork, transparent background works best)
 and run `Build.bat` again — every app icon is regenerated from that file.
 
 ## Install & use
 
 **Windows** — run `Single-Setup-v0.1.0.exe` (or just `Single.exe`). In
+=======
+All app icons are generated from **`logo.svg`** in the repo root (square
+artwork, transparent background works best). Replace it and run `Build.bat`
+again — every icon, including the Android launcher icons, is regenerated
+from that file.
+
+## Install & use
+
+**Windows** — run `Single-Setup-v0.1.2.exe` (or just `Single.exe`). In
+>>>>>>> e87b726b12d4762f68ebf0cba47f2ef7fa1f21b4
 *Settings → Enable drive support* accept the one-time UAC prompt: it
 installs Single's certificate, starts the WebClient service, lifts the
 50 MB WebDAV cap, and opens the firewall. Then map paired devices as drives
@@ -147,9 +182,57 @@ app's private storage.
   and the PIN — a device that was never approved cannot read a byte.
 - All paths are sandboxed inside the shared folder (`..`-traversal rejected).
 - Unpairing revokes the token on both devices instantly.
+<<<<<<< HEAD
 - Known v0.1.0 limits: the WebDAV token travels in the URL-mapping (like any
   drive mapping), and drives must be re-mapped if a device's IP changes.
 
+=======
+- Known v0.1.2 limits: the WebDAV token travels in the URL-mapping (like any
+  drive mapping), and drives must be re-mapped if a device's IP changes.
+
+## Troubleshooting
+
+### `A problem occurred starting process 'command 'npm.bat''` (Android)
+
+The Android build has two layers: `Build.bat` → Gradle → back into the
+Tauri CLI. When the Android project was generated via `npx`, the generated
+Gradle task (`src-tauri/gen/android/buildSrc/.../BuildTask.kt`) launches the
+Tauri CLI **through npm**, so Gradle must be able to start `npm.bat`.
+It fails when npm is missing from the PATH that the Gradle *daemon* sees:
+
+1. **Install Node.js LTS** from <https://nodejs.org> (if `npm --version`
+   fails in a fresh terminal).
+2. **Open a NEW terminal** (or reboot) — running shells and Gradle daemons
+   keep the PATH they were started with. `Build.bat` now runs
+   `gradlew --stop` before building, which retires stale daemons
+   automatically; rebooting does the same.
+3. Verify: `where npm` must print a path, then run `Build.bat` again.
+4. Still stuck? Delete `src-tauriin/android` → run `Build.bat`; the
+4. Still stuck? Delete `src-tauri\gen\android` and run `Build.bat`; the
+
+### `memory allocation of ... bytes failed` (rustc dies mid-build)
+
+The compiler ran out of RAM — the `windows` crate that Tauri depends on is
+gigantic and each rustc process can peak at several GB. Multiple rustc
+processes run in parallel by default, so machines with 8 GB or less (or a
+browser / Android Studio open at the same time) hit the wall mid-build.
+
+- `Build.bat` detects your RAM and caps parallel compile jobs automatically
+  (16 GB+ → no cap, 8 GB → 2 jobs, less → 1 job). It also intentionally does
+  not enable `lto` / `codegen-units = 1`, which multiply peak memory.
+- Free more RAM: close browsers, Android Studio, IDEs before building.
+- Force the safest setting once and rebuild in the same terminal:
+  `set CARGO_BUILD_JOBS=1` then `Build.bat`.
+- Make sure Windows has a page file enabled (System → Advanced system
+  settings → Performance → Virtual memory).
+
+### Windows build is fine, only the APK fails
+
+That is expected whenever a prerequisite of the Android toolchain is
+missing (NDK, licenses, Node). All Windows artifacts under `Single\Windows\`
+are already finished — fix the reported cause and re-run `Build.bat`.
+
+>>>>>>> e87b726b12d4762f68ebf0cba47f2ef7fa1f21b4
 ## Roadmap
 
 - Bluetooth discovery + transfer
