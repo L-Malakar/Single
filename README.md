@@ -11,11 +11,7 @@ were local.
 - **Source code:** <https://github.com/L-Malakar/Single>
 - **License:** [MIT](https://github.com/L-Malakar/Single/blob/main/LICENSE)
 - **Platforms:** Windows · Android *(Linux & macOS: roadmap)*
-<<<<<<< HEAD
-- **Version:** 0.1.0
-=======
 - **Version:** 0.1.2
->>>>>>> e87b726b12d4762f68ebf0cba47f2ef7fa1f21b4
 
 ---
 
