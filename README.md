@@ -11,7 +11,7 @@ were local.
 - **Source code:** <https://github.com/L-Malakar/Single>
 - **License:** [MIT](https://github.com/L-Malakar/Single/blob/main/LICENSE)
 - **Platforms:** Windows · Android *(Linux & macOS: roadmap)*
-- **Version:** 0.1.1
+- **Version:** 0.1.2
 
 ---
 
@@ -91,7 +91,7 @@ Build.bat
 ```
 
 The script does everything: refreshes icons from `logo.svg`, builds the
-Windows exe, builds `Single-Setup-v0.1.1.exe`, packs the portable zip, and —
+Windows exe, builds `Single-Setup-v0.1.2.exe`, packs the portable zip, and —
 when an Android SDK is present — generates the Android project on first run
 and builds the APK.
 
@@ -101,10 +101,10 @@ and builds the APK.
 Single\
 ├── Windows\
 │   ├── Single.exe                  portable, just run it
-│   ├── Single-Setup-v0.1.1.exe     installer (Inno Setup or NSIS)
-│   └── Single-v0.1.1.zip           portable zip
+│   ├── Single-Setup-v0.1.2.exe     installer (Inno Setup or NSIS)
+│   └── Single-v0.1.2.zip           portable zip
 └── Android\
-    └── Single-v0.1.1.apk           debug-signed, installs directly
+    └── Single-v0.1.2.apk           debug-signed, installs directly
 ```
 
 ### Use your own logo
@@ -116,7 +116,7 @@ from that file.
 
 ## Install & use
 
-**Windows** — run `Single-Setup-v0.1.1.exe` (or just `Single.exe`). In
+**Windows** — run `Single-Setup-v0.1.2.exe` (or just `Single.exe`). In
 *Settings → Enable drive support* accept the one-time UAC prompt: it
 installs Single's certificate, starts the WebClient service, lifts the
 50 MB WebDAV cap, and opens the firewall. Then map paired devices as drives
@@ -150,7 +150,7 @@ app's private storage.
   and the PIN — a device that was never approved cannot read a byte.
 - All paths are sandboxed inside the shared folder (`..`-traversal rejected).
 - Unpairing revokes the token on both devices instantly.
-- Known v0.1.1 limits: the WebDAV token travels in the URL-mapping (like any
+- Known v0.1.2 limits: the WebDAV token travels in the URL-mapping (like any
   drive mapping), and drives must be re-mapped if a device's IP changes.
 
 ## Troubleshooting
@@ -172,6 +172,22 @@ It fails when npm is missing from the PATH that the Gradle *daemon* sees:
 3. Verify: `where npm` must print a path, then run `Build.bat` again.
 4. Still stuck? Delete `src-tauriin/android` → run `Build.bat`; the
 4. Still stuck? Delete `src-tauri\gen\android` and run `Build.bat`; the
+
+### `memory allocation of ... bytes failed` (rustc dies mid-build)
+
+The compiler ran out of RAM — the `windows` crate that Tauri depends on is
+gigantic and each rustc process can peak at several GB. Multiple rustc
+processes run in parallel by default, so machines with 8 GB or less (or a
+browser / Android Studio open at the same time) hit the wall mid-build.
+
+- `Build.bat` detects your RAM and caps parallel compile jobs automatically
+  (16 GB+ → no cap, 8 GB → 2 jobs, less → 1 job). It also intentionally does
+  not enable `lto` / `codegen-units = 1`, which multiply peak memory.
+- Free more RAM: close browsers, Android Studio, IDEs before building.
+- Force the safest setting once and rebuild in the same terminal:
+  `set CARGO_BUILD_JOBS=1` then `Build.bat`.
+- Make sure Windows has a page file enabled (System → Advanced system
+  settings → Performance → Virtual memory).
 
 ### Windows build is fine, only the APK fails
 
