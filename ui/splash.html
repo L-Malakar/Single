@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Single</title>
+  <link rel="icon" href="assets/icon.png" />
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      background: #12141a;
+      overflow: hidden;
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      -webkit-user-select: none; user-select: none;
+    }
+    .splash {
+      height: 100%;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 14px;
+    }
+    .logo {
+      width: 88px; height: 88px;
+      border-radius: 22px;
+      filter: drop-shadow(0 6px 18px rgba(10, 132, 255, 0.35));
+      animation: pop 0.45s ease-out both;
+    }
+    .name {
+      margin-top: 4px;
+      color: #f2f5fa;
+      font-size: 26px; font-weight: 700; letter-spacing: 0.04em;
+    }
+    .tag {
+      color: #8b93a7;
+      font-size: 12.5px; letter-spacing: 0.08em;
+    }
+    .bar {
+      margin-top: 10px;
+      width: 180px; height: 4px;
+      border-radius: 4px;
+      background: #232937;
+      overflow: hidden;
+    }
+    .bar-fill {
+      width: 40%; height: 100%;
+      border-radius: 4px;
+      background: linear-gradient(90deg, #0a84ff, #6db6ff);
+      animation: slide 1.15s ease-in-out infinite;
+    }
+    @keyframes pop { from { transform: scale(0.86); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+    @keyframes slide { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
+  </style>
+</head>
+<body>
+  <div class="splash">
+    <img class="logo" src="assets/logo.svg" alt="Single logo" />
+    <div class="name">Single</div>
+    <div class="tag">one room, one network</div>
+    <div class="bar"><div class="bar-fill"></div></div>
+  </div>
+</body>
+</html>
