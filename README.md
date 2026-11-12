@@ -74,21 +74,13 @@ extra compatibility layer later.
 | Tool | Why | Get it |
 | --- | --- | --- |
 | Rust (stable) | compiles the backend | <https://rustup.rs> |
-<<<<<<< HEAD
-| Node.js + npm *(optional)* | faster Tauri CLI install | <https://nodejs.org> |
-=======
 | Node.js + npm | Tauri CLI + **required for the APK** (the Android Gradle build runs the Tauri CLI through npm) | <https://nodejs.org> |
->>>>>>> e87b726b12d4762f68ebf0cba47f2ef7fa1f21b4
 | Inno Setup 6 *(optional)* | nicer `Single-Setup.exe` | <https://jrsoftware.org/isinfo.php> |
 | Android Studio *(for the APK)* | SDK + NDK + JDK | <https://developer.android.com/studio> |
 
 Without Node the script installs `tauri-cli` through Cargo (slower, one
-<<<<<<< HEAD
-time). Without Inno Setup the script falls back to Tauri's built-in NSIS
-=======
 time) and Windows artifacts still build — but the **APK step needs Node.js**.
 Without Inno Setup the script falls back to Tauri's built-in NSIS
->>>>>>> e87b726b12d4762f68ebf0cba47f2ef7fa1f21b4
 installer. Without Android Studio you still get all Windows artifacts.
 
 ### Build
@@ -99,11 +91,7 @@ Build.bat
 ```
 
 The script does everything: refreshes icons from `logo.svg`, builds the
-<<<<<<< HEAD
-Windows exe, builds `Single-Setup-v0.1.0.exe`, packs the portable zip, and —
-=======
 Windows exe, builds `Single-Setup-v0.1.2.exe`, packs the portable zip, and —
->>>>>>> e87b726b12d4762f68ebf0cba47f2ef7fa1f21b4
 when an Android SDK is present — generates the Android project on first run
 and builds the APK.
 
@@ -113,29 +101,14 @@ and builds the APK.
 Single\
 ├── Windows\
 │   ├── Single.exe                  portable, just run it
-<<<<<<< HEAD
-│   ├── Single-Setup-v0.1.0.exe     installer (Inno Setup or NSIS)
-│   └── Single-v0.1.0.zip           portable zip
-└── Android\
-    └── Single-v0.1.0.apk           debug-signed, installs directly
-=======
 │   ├── Single-Setup-v0.1.2.exe     installer (Inno Setup or NSIS)
 │   └── Single-v0.1.2.zip           portable zip
 └── Android\
     └── Single-v0.1.2.apk           debug-signed, installs directly
->>>>>>> e87b726b12d4762f68ebf0cba47f2ef7fa1f21b4
 ```
 
 ### Use your own logo
 
-<<<<<<< HEAD
-Replace **`logo.svg`** (square artwork, transparent background works best)
-and run `Build.bat` again — every app icon is regenerated from that file.
-
-## Install & use
-
-**Windows** — run `Single-Setup-v0.1.0.exe` (or just `Single.exe`). In
-=======
 All app icons are generated from **`logo.svg`** in the repo root (square
 artwork, transparent background works best). Replace it and run `Build.bat`
 again — every icon, including the Android launcher icons, is regenerated
@@ -144,7 +117,6 @@ from that file.
 ## Install & use
 
 **Windows** — run `Single-Setup-v0.1.2.exe` (or just `Single.exe`). In
->>>>>>> e87b726b12d4762f68ebf0cba47f2ef7fa1f21b4
 *Settings → Enable drive support* accept the one-time UAC prompt: it
 installs Single's certificate, starts the WebClient service, lifts the
 50 MB WebDAV cap, and opens the firewall. Then map paired devices as drives
@@ -178,11 +150,6 @@ app's private storage.
   and the PIN — a device that was never approved cannot read a byte.
 - All paths are sandboxed inside the shared folder (`..`-traversal rejected).
 - Unpairing revokes the token on both devices instantly.
-<<<<<<< HEAD
-- Known v0.1.0 limits: the WebDAV token travels in the URL-mapping (like any
-  drive mapping), and drives must be re-mapped if a device's IP changes.
-
-=======
 - Known v0.1.2 limits: the WebDAV token travels in the URL-mapping (like any
   drive mapping), and drives must be re-mapped if a device's IP changes.
 
@@ -228,7 +195,6 @@ That is expected whenever a prerequisite of the Android toolchain is
 missing (NDK, licenses, Node). All Windows artifacts under `Single\Windows\`
 are already finished — fix the reported cause and re-run `Build.bat`.
 
->>>>>>> e87b726b12d4762f68ebf0cba47f2ef7fa1f21b4
 ## Roadmap
 
 - Bluetooth discovery + transfer

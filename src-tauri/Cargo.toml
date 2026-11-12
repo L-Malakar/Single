@@ -1,6 +1,6 @@
 [package]
 name = "single"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 description = "Single — connect all devices in a room into one."
 authors = ["L. Malakar"]
@@ -28,5 +28,8 @@ single-core = { path = "../crates/single-core" }
 
 [profile.release]
 strip = true
-lto = true
-codegen-units = 1
+# NOTE: no `lto = true` and no `codegen-units = 1` on purpose. Those make
+# rustc peak at several GB of RAM per crate (the `windows` crate alone can
+# exhaust an 8 GB machine), killing the build with
+# "memory allocation of ... bytes failed". The default settings compile
+# everywhere; the size difference is a few MB.
