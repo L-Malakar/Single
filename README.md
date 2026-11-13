@@ -11,7 +11,7 @@ were local.
 - **Source code:** <https://github.com/L-Malakar/Single>
 - **License:** [MIT](https://github.com/L-Malakar/Single/blob/main/LICENSE)
 - **Platforms:** Windows · Android *(Linux & macOS: roadmap)*
-- **Version:** 0.1.4
+- **Version:** 0.1.5
 
 ---
 
@@ -97,7 +97,7 @@ Build.bat
 
 The script does everything: installs the local Tauri CLI (`npm install`),
 refreshes icons from `logo.svg`, builds the Windows exe, builds
-`Single-Setup-v0.1.4.exe`, packs the portable zip, and — when an Android SDK
+`Single-Setup-v0.1.5.exe`, packs the portable zip, and — when an Android SDK
 is present — generates the Android project on first run and builds the APK.
 
 ### Artifacts
@@ -106,10 +106,10 @@ is present — generates the Android project on first run and builds the APK.
 Single\
 ├── Windows\
 │   ├── Single.exe                  portable, just run it
-│   ├── Single-Setup-v0.1.4.exe     installer (Inno Setup or NSIS)
-│   └── Single-v0.1.4.zip           portable zip
+│   ├── Single-Setup-v0.1.5.exe     installer (Inno Setup or NSIS)
+│   └── Single-v0.1.5.zip           portable zip
 └── Android\
-    └── Single-v0.1.4.apk           debug-signed, installs directly
+    └── Single-v0.1.5.apk           debug-signed, installs directly
 ```
 
 ## Where the logo appears
@@ -154,15 +154,51 @@ up the Android WebView's native callout/drag preview on top of the app and
 freeze the screen. v0.1.4 disables image dragging, the touch callout and
 text selection UI-wide (typing and the pairing PIN still work as before).
 
+**Mobile is a first-class citizen since v0.1.5.** The Android file picker
+returns `content://` streams that cannot be opened as file paths, so uploads
+from a phone now go through the WebView's own file input and a chunked
+staging pipeline (`upload_begin` / `upload_chunk` / `upload_end`) — with the
+same progress view and failure handling as desktop uploads. Downloads try
+the public `Download/Single` folder first (when Android lets the app write
+it) so files actually show up in file managers and galleries, and fall back
+to app storage otherwise. The hardware **back button** closes the open
+dialog first and returns to *Devices* before exiting, and bottom sheets
+ride above the on-screen keyboard instead of hiding under it.
+
+## What changed in 0.1.5 (bug hunt)
+
+A full audit of the codebase fixed, among others:
+
+- **Windows: all writes were rejected.** `canonicalize()` returns verbatim
+  `\\?\C:\...` paths on Windows, so the share-root containment check failed
+  for every upload / folder creation / delete / rename. Both sides of the
+  comparison are now canonicalized and prefix-normalized.
+- **Unpair left the network drive mapped** on Windows (the drive letter was
+  looked up *after* the pairing record was deleted).
+- **Locked files could not be deleted** by their lock owner for up to an
+  hour (the lock check dropped the request's `If:` token).
+- **Chunked uploads could desync keep-alive connections** (the trailer
+  parser left bytes in the stream).
+- **File names containing `&amp;`-like text** were corrupted by a double
+  XML-unescape in the directory listing parser.
+- A stalled peer can no longer freeze a transfer forever (120 s read
+  timeout), one slow offline device no longer delays everyone's
+  online/offline status (concurrent heartbeats), the transfer list no
+  longer grows without bound, and several panic paths (string slicing on
+  short IDs, port retry near 65535) were removed.
+
 ## Install & use
 
-**Windows** — run `Single-Setup-v0.1.4.exe` (or just `Single.exe`). In
+**Windows** — run `Single-Setup-v0.1.5.exe` (or just `Single.exe`). In
 *Settings → Enable drive support* accept the one-time UAC prompt: it
 installs Single's certificate, starts the WebClient service, lifts the
 50 MB WebDAV cap, and opens the firewall. Then map paired devices as drives
 from the *Devices* page.
 
-**Android** — allow "install from unknown sources" for the APK. On rooted
+**Android** — allow "install from unknown sources" for the APK. Uploads
+use the system file picker directly (any file, any app, no storage
+permission needed); downloads land in `Download/Single` when the OS allows
+it, otherwise in the app folder shown in *About*. On rooted
 phones enable *Settings → Expose per-device folders at /single* to create
 `/single/<DeviceName>` (bind-mounted from the app's own storage). Without
 root everything still works inside the app; the folders simply live in the
@@ -188,9 +224,10 @@ app's private storage.
   verified cryptographically on both ends.
 - File access requires a shared token derived from both device fingerprints
   and the PIN — a device that was never approved cannot read a byte.
-- All paths are sandboxed inside the shared folder (`..`-traversal rejected).
+- All paths are sandboxed inside the shared folder (`..`-traversal
+  rejected, symlink escapes blocked since v0.1.5).
 - Unpairing revokes the token on both devices instantly.
-- Known v0.1.4 limits: the WebDAV token travels in the URL-mapping (like any
+- Known v0.1.5 limits: the WebDAV token travels in the URL-mapping (like any
   drive mapping), and drives must be re-mapped if a device's IP changes.
 
 ## Troubleshooting

@@ -392,10 +392,16 @@ impl PairManager {
     }
 
     /// The initiator stores the *remote* request id once the target replies.
-    pub async fn rename_outgoing(&self, new_req_id: String) {
+    /// Keyed by the local id from `start_outgoing` — renaming "the last
+    /// entry" could hit a concurrent pairing attempt's record.
+    pub async fn rename_outgoing(&self, old_req_id: &str, new_req_id: &str) {
         let mut inner = self.inner.lock().await;
-        if let Some(last) = inner.outgoing.last_mut() {
-            last.req_id = new_req_id;
+        if let Some(rec) = inner
+            .outgoing
+            .iter_mut()
+            .find(|r| r.req_id == old_req_id)
+        {
+            rec.req_id = new_req_id.to_string();
         }
     }
 

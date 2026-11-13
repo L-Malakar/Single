@@ -88,6 +88,9 @@ pub fn run() {
             peer_rename,
             peer_delete,
             upload_files,
+            upload_begin,
+            upload_chunk,
+            upload_end,
             download_file,
             list_transfers,
             win_map_drive,
@@ -261,6 +264,38 @@ async fn upload_files(
     local_paths: Vec<String>,
 ) -> CmdResult<Vec<u64>> {
     Ok(state.app.upload_files(&peer_id, &remote_dir, local_paths).await)
+}
+
+/// Mobile uploads: the Android file picker returns content:// streams that
+/// cannot be opened as paths, so the UI stages the file in base64 chunks
+/// (upload_begin / upload_chunk) and then hands it to the normal upload
+/// pipeline (upload_end) — with progress and retries like any upload.
+#[tauri::command]
+async fn upload_begin(state: State<'_, AppState>, file_name: String) -> CmdResult<u64> {
+    state.app.staged_upload_begin(&file_name).map_err(err)
+}
+
+#[tauri::command]
+async fn upload_chunk(
+    state: State<'_, AppState>,
+    upload_id: u64,
+    data_b64: String,
+) -> CmdResult<()> {
+    state.app.staged_upload_append(upload_id, &data_b64).map_err(err)
+}
+
+#[tauri::command]
+async fn upload_end(
+    state: State<'_, AppState>,
+    upload_id: u64,
+    peer_id: String,
+    remote_dir: String,
+) -> CmdResult<u64> {
+    state
+        .app
+        .staged_upload_finish(upload_id, &peer_id, &remote_dir)
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]

@@ -35,6 +35,12 @@ const LOCK_TTL_SECS: u64 = 3600;
 
 pub struct DavServer {
     pub share_root: PathBuf,
+    /// canonicalized share root (once, at construction). On Windows
+    /// `canonicalize()` returns verbatim `\\?\C:\...` paths, so every
+    /// containment check must compare like-for-like against this — comparing
+    /// against the raw `share_root` used to reject *every* write with
+    /// "path escapes share root".
+    root_canon: PathBuf,
     pub identity: Arc<Identity>,
     pub pairs: Arc<PairManager>,
     locks: Mutex<HashMap<String, Lock>>,
@@ -49,8 +55,10 @@ struct Lock {
 
 impl DavServer {
     pub fn new(share_root: PathBuf, identity: Arc<Identity>, pairs: Arc<PairManager>) -> Arc<Self> {
+        let root_canon = std::fs::canonicalize(&share_root).unwrap_or(share_root.clone());
         Arc::new(DavServer {
             share_root,
+            root_canon,
             identity,
             pairs,
             locks: Mutex::new(HashMap::new()),
@@ -73,7 +81,12 @@ impl DavServer {
                 accepted = listener.accept() => {
                     let (stream, _addr) = match accepted {
                         Ok(x) => x,
-                        Err(_) => continue,
+                        // transient errors (EMFILE, a disappearing Wi-Fi
+                        // interface) must not turn into a busy loop
+                        Err(_) => {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
                     };
                     let this = self.clone();
                     let tls = tls.clone();
@@ -229,8 +242,8 @@ impl DavServer {
                 let _ = read_body_inline(body, head).await; // ignored (allprop)
                 self.handle_propfind(&rel).await
             }
-            "MKCOL" => self.handle_mkcol(&rel).await,
-            "DELETE" => self.handle_delete(&rel).await,
+            "MKCOL" => self.handle_mkcol(head, &rel).await,
+            "DELETE" => self.handle_delete(head, &rel).await,
             "MOVE" => self.handle_move_copy(head, &rel, true).await,
             "COPY" => self.handle_move_copy(head, &rel, false).await,
             "PROPPATCH" => {
@@ -426,7 +439,7 @@ impl DavServer {
         if rel.is_empty() {
             return Ok(Response::text(400, "bad path"));
         }
-        if let Some(r) = self.check_lock(rel, head) {
+        if let Some(r) = self.check_lock(rel, Some(head)) {
             return Ok(r);
         }
         let full = match self.resolve_write(rel).await {
@@ -549,8 +562,8 @@ impl DavServer {
 
     // -------------------------------------------------- MKCOL / DELETE / MOVE
 
-    async fn handle_mkcol(&self, rel: &str) -> Result<Response> {
-        if let Some(r) = self.check_lock(rel, &RequestHead::fake()) {
+    async fn handle_mkcol(&self, head: &RequestHead, rel: &str) -> Result<Response> {
+        if let Some(r) = self.check_lock(rel, Some(head)) {
             return Ok(r);
         }
         let full = match self.resolve_write(rel).await {
@@ -570,8 +583,8 @@ impl DavServer {
         Ok(Response::new(201))
     }
 
-    async fn handle_delete(&self, rel: &str) -> Result<Response> {
-        if let Some(r) = self.check_lock(rel, &RequestHead::fake()) {
+    async fn handle_delete(&self, head: &RequestHead, rel: &str) -> Result<Response> {
+        if let Some(r) = self.check_lock(rel, Some(head)) {
             return Ok(r);
         }
         let full = match self.resolve_write(rel).await {
@@ -678,12 +691,15 @@ impl DavServer {
         Ok(Response::new(204))
     }
 
-    fn check_lock(&self, rel: &str, head: &RequestHead) -> Option<Response> {
+    fn check_lock(&self, rel: &str, head: Option<&RequestHead>) -> Option<Response> {
         let now = now_secs();
         let mut locks = self.locks.lock().unwrap();
         locks.retain(|_, l| l.expires > now);
         if let Some(lock) = locks.get(rel) {
-            let if_header = head.header("if").unwrap_or("");
+            // The real request head carries the `If:` token; a `fake()` head
+            // used to make every DELETE/MKCOL on a locked resource fail
+            // with 423 — even for the lock owner.
+            let if_header = head.and_then(|h| h.header("if")).unwrap_or("");
             if !if_header.contains(&lock.token) {
                 return Some(Response::text(423, "resource is locked"));
             }
@@ -696,11 +712,20 @@ impl DavServer {
     /// Resolve a WebDAV-relative path for reading (must exist inside root).
     fn resolve_read(&self, rel: &str) -> Result<PathBuf> {
         let full = join_under_root(&self.share_root, rel)?;
+        // Defense in depth: when the target exists, verify it really lives
+        // inside the share root and is not a symlink pointing outside.
+        if let Ok(canon) = std::fs::canonicalize(&full) {
+            if !path_starts_with_root(&self.root_canon, &canon) {
+                return Err(anyhow!("path escapes share root"));
+            }
+        }
         Ok(full)
     }
 
     /// Resolve for writing; verifies that the nearest existing ancestor is
-    /// inside the share root.
+    /// inside the share root. Both sides of the comparison are canonical
+    /// (see `root_canon`), otherwise Windows verbatim `\\?\` paths never
+    /// match and every write is rejected.
     async fn resolve_write(&self, rel: &str) -> Result<PathBuf> {
         let full = join_under_root(&self.share_root, rel)?;
         let mut ancestor = full.as_path();
@@ -709,7 +734,7 @@ impl DavServer {
                 let canon = tokio::fs::canonicalize(ancestor)
                     .await
                     .unwrap_or_else(|_| ancestor.to_path_buf());
-                if !crate::identity::path_within(&self.share_root, &canon) {
+                if !path_starts_with_root(&self.root_canon, &canon) {
                     return Err(anyhow!("path escapes share root"));
                 }
                 break;
@@ -731,7 +756,8 @@ impl DavServer {
                 let claimed_fp = body["fp"].as_str().unwrap_or("").to_lowercase();
                 let claimed_id = body["id"].as_str().unwrap_or("").to_lowercase();
                 let name = body["name"].as_str().unwrap_or("Device").to_string();
-                if claimed_fp != caller_fp || !claimed_id.is_empty() && claimed_id != &caller_fp[..16] {
+                let caller_prefix = caller_fp.get(..16).unwrap_or("");
+                if claimed_fp != caller_fp || (!claimed_id.is_empty() && claimed_id != caller_prefix) {
                     return Ok(Response::json(
                         403,
                         serde_json::json!({"error": "identity mismatch"}).to_string(),
@@ -936,6 +962,32 @@ fn join_under_root(root: &Path, rel: &str) -> Result<PathBuf> {
         p.push(seg);
     }
     Ok(p)
+}
+
+/// Containment check used by `resolve_read` / `resolve_write`.
+///
+/// `std::fs::canonicalize` on Windows returns *verbatim* paths
+/// (`\\?\C:\...`) and the on-disk casing, neither of which matches a
+/// user-typed path component-wise. Normalize both sides: strip the verbatim
+/// prefix, lowercase on Windows, then compare on a separator boundary.
+pub fn path_starts_with_root(root: &Path, candidate: &Path) -> bool {
+    let norm = |p: &Path| -> String {
+        let s = p.to_string_lossy().replace("\\\\?\\", "");
+        if cfg!(windows) {
+            s.to_ascii_lowercase()
+        } else {
+            s
+        }
+    };
+    let r = norm(root);
+    let c = norm(candidate);
+    if r.is_empty() {
+        return true;
+    }
+    if r.ends_with('/') || r.ends_with('\\') {
+        return c.starts_with(&r);
+    }
+    c == r || c.starts_with(&format!("{}/", r)) || c.starts_with(&format!("{}\\", r))
 }
 
 /// Convert a `Destination:` header (absolute URL or absolute path) into a

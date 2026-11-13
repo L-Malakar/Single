@@ -11,7 +11,7 @@
 
 #define MyAppName "Single"
 #ifndef MyAppVersion
-#define MyAppVersion "0.1.4"
+#define MyAppVersion "0.1.5"
 #endif
 #define MyAppPublisher "L. Malakar"
 #define MyAppURL "https://github.com/L-Malakar/Single"

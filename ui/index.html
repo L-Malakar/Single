@@ -118,7 +118,7 @@
         <div class="sidebar-footer">
           <div class="me-line" id="me-name">…</div>
           <div class="me-sub" id="me-id">starting…</div>
-          <div class="me-sub">v<span id="me-version">0.1.4</span> · MIT · by L. Malakar</div>
+          <div class="me-sub">v<span id="me-version">0.1.5</span> · MIT · by L. Malakar</div>
         </div>
       </aside>
 
@@ -193,7 +193,7 @@
                 <option value="light">Light</option>
               </select>
             </label>
-            <label class="field">
+            <label class="field" id="field-share">
               <span>Shared folder (what other devices can see)</span>
               <div class="row">
                 <input id="set-share" type="text" readonly placeholder="…" />
@@ -274,6 +274,11 @@
         <svg class="ic"><use href="#i-about"></use></svg><span>About</span>
       </button>
     </nav>
+
+    <!-- Hidden file input: on Android the plugin file picker returns
+         content:// URIs that cannot be opened as file paths, so uploads go
+         through the WebView's own input (which streams real bytes). -->
+    <input type="file" id="file-picker" multiple hidden />
 
     <!-- ================= Modals ================= -->
     <div id="modal-root" class="modal-root hidden">

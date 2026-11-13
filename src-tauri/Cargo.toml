@@ -1,6 +1,6 @@
 [package]
 name = "single"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Single — connect all devices in a room into one."
 authors = ["L. Malakar"]

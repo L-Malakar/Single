@@ -3,13 +3,13 @@ rem ============================================================
 rem  Single build script  (Windows)
 rem  Produces:
 rem    Single\Windows\Single.exe
-rem    Single\Windows\Single-Setup-v0.1.4.exe   (Inno Setup, or NSIS fallback)
-rem    Single\Windows\Single-v0.1.4.zip         (portable)
-rem    Single\Android\Single-v0.1.4.apk         (needs Android Studio + Node.js)
+rem    Single\Windows\Single-Setup-v0.1.5.exe   (Inno Setup, or NSIS fallback)
+rem    Single\Windows\Single-v0.1.5.zip         (portable)
+rem    Single\Android\Single-v0.1.5.apk         (needs Android Studio + Node.js)
 rem ============================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
-set VERSION=0.1.4
+set VERSION=0.1.5
 set OUT=Single
 set TAURI_ARGS=
 

@@ -20,6 +20,9 @@ use tokio_rustls::TlsConnector;
 
 const MAX_HEAD: usize = 64 * 1024;
 const MAX_INLINE_BODY: u64 = 32 * 1024 * 1024;
+/// Per-read inactivity cap. Without it a peer that stalls mid-transfer (or a
+/// phone that falls asleep) leaves the transfer "active" forever.
+const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct Conn {
     rd: tokio::io::ReadHalf<tokio_rustls::client::TlsStream<TcpStream>>,
@@ -97,7 +100,9 @@ pub async fn connect(
 impl Conn {
     async fn fill(&mut self) -> Result<usize> {
         let mut chunk = [0u8; 16 * 1024];
-        let n = self.rd.read(&mut chunk).await?;
+        let n = tokio::time::timeout(READ_TIMEOUT, self.rd.read(&mut chunk))
+            .await
+            .map_err(|_| anyhow!("peer stopped responding (read timeout)"))??;
         if n > 0 {
             self.buf.extend_from_slice(&chunk[..n]);
         }

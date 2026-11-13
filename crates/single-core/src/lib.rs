@@ -36,7 +36,7 @@ use pairing::PairManager;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -64,11 +64,22 @@ pub struct SelfInfo {
     pub ips: Vec<IpAddr>,
     pub port: u16,
     pub share_dir: String,
+    /// Where downloads actually land (on Android this may be the public
+    /// Download folder when the app can write it).
+    pub downloads_dir: String,
     pub version: &'static str,
     pub platform: &'static str,
     pub theme: String,
     pub auto_map_drives: bool,
     pub root_mode: bool,
+}
+
+/// A file staged for upload in pieces (mobile file pickers hand the UI a
+/// stream of bytes, not a filesystem path).
+#[derive(Clone)]
+struct StagedUpload {
+    name: String,
+    path: PathBuf,
 }
 
 pub struct SingleApp {
@@ -84,6 +95,9 @@ pub struct SingleApp {
     effective_port: AtomicU16,
     server_offs: Mutex<Vec<tokio::sync::watch::Sender<bool>>>,
     started: AtomicBool,
+    /// staged (chunked) uploads coming from the mobile UI
+    staged: Mutex<HashMap<u64, StagedUpload>>,
+    staging_counter: AtomicU64,
 }
 
 impl SingleApp {
@@ -91,6 +105,8 @@ impl SingleApp {
         let paths = Paths::new(base_dir)?;
         let share = paths.ensure_layout()?;
         let _ = share;
+        // staged uploads from an interrupted previous run are useless
+        let _ = std::fs::remove_dir_all(paths.base.join("Cache").join("uploads"));
         let cfg = paths.load_config();
         let (events, _) = broadcast::channel(256);
         let pairs = PairManager::load(paths.pairings_file(), events.clone());
@@ -107,6 +123,8 @@ impl SingleApp {
             effective_port: AtomicU16::new(config::DEFAULT_TCP_PORT),
             server_offs: Mutex::new(Vec::new()),
             started: AtomicBool::new(false),
+            staged: Mutex::new(HashMap::new()),
+            staging_counter: AtomicU64::new(1),
         }))
     }
 
@@ -223,7 +241,11 @@ impl SingleApp {
         let listener = loop {
             match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
                 Ok(l) => break l,
-                Err(_) if port < cfg.tcp_port + 20 => port += 1,
+                // u32 math so a port near 65535 cannot overflow u16 and
+                // panic (debug builds) or wrap around (release builds)
+                Err(_) if (port as u32) < (cfg.tcp_port as u32 + 20) && port < 65535 => {
+                    port += 1;
+                }
                 Err(e) => return Err(anyhow!("cannot bind port {}: {}", cfg.tcp_port, e)),
             }
         };
@@ -271,6 +293,7 @@ impl SingleApp {
             ips: discovery::local_ipv4s(),
             port: self.effective_port(),
             share_dir: self.share_root().to_string_lossy().to_string(),
+            downloads_dir: self.paths.preferred_downloads().to_string_lossy().to_string(),
             version: APP_VERSION,
             platform: platform::platform_name(),
             theme: cfg.theme,
@@ -461,9 +484,11 @@ impl SingleApp {
             .ok_or_else(|| anyhow!("device did not accept pairing request"))?
             .to_string();
         let addr = format!("{}:{}", rec.addr, rec.port);
-        self.pairs.start_outgoing(&addr, Some(peer_id.to_string())).await;
-        // remember the real (remote) request id by replacing the placeholder
-        self.pairs.rename_outgoing(req_id.clone()).await;
+        let outgoing = self.pairs.start_outgoing(&addr, Some(peer_id.to_string())).await;
+        // remember the real (remote) request id by replacing the local
+        // placeholder — keyed by the id we got back, not by "last entry",
+        // which could belong to a concurrent pairing attempt
+        self.pairs.rename_outgoing(&outgoing.req_id, &req_id).await;
         Ok(req_id)
     }
 
@@ -596,6 +621,16 @@ impl SingleApp {
     }
 
     pub async fn unpair(self: &Arc<Self>, peer_id: &str) -> Result<()> {
+        // capture the drive letter BEFORE removing the pairing — the old
+        // code looked it up afterwards and always found nothing, so the
+        // mapped drive was never removed on Windows
+        #[cfg(windows)]
+        let drive_letter = self
+            .pairs
+            .pairing_by_id(peer_id)
+            .await
+            .and_then(|p| p.drive_letter);
+
         // tell the peer (best effort)
         if let Some(pairing) = self.pairs.pairing_by_id(peer_id).await {
             if let Ok(mut conn) = self.connect_paired(&pairing).await {
@@ -611,13 +646,11 @@ impl SingleApp {
         }
         self.pairs.remove_pairing(peer_id).await;
         self.online.lock().unwrap().remove(peer_id);
+
         #[cfg(windows)]
         {
-            // remove a mapped drive if we created one
-            if let Some(p) = self.pairs.pairing_by_id(peer_id).await {
-                if let Some(letter) = p.drive_letter {
-                    let _ = platform::win::unmap_drive(&letter).await;
-                }
+            if let Some(letter) = drive_letter {
+                let _ = platform::win::unmap_drive(&letter).await;
             }
         }
         Ok(())
@@ -834,7 +867,7 @@ impl SingleApp {
             .ok_or_else(|| anyhow!("not paired"))?;
         let dir = match local_dir {
             Some(d) => PathBuf::from(d),
-            None => self.paths.downloads(),
+            None => self.paths.preferred_downloads(),
         };
         tokio::fs::create_dir_all(&dir).await?;
         let fname = remote_path.rsplit('/').next().unwrap_or("file");
@@ -911,6 +944,118 @@ impl SingleApp {
             .await
             .map(|p| p.name)
             .unwrap_or_else(|| "Device".into())
+    }
+
+    // -------------------------------------------------- staged uploads (mobile)
+
+    /// Directory holding in-progress staged uploads.
+    fn staging_dir(&self) -> PathBuf {
+        let d = self.paths.base.join("Cache").join("uploads");
+        let _ = std::fs::create_dir_all(&d);
+        d
+    }
+
+    /// Begin staging a file that will later be uploaded to a peer in
+    /// chunks (mobile file pickers return content:// streams, not paths).
+    pub fn staged_upload_begin(&self, file_name: &str) -> Result<u64> {
+        // keep only the base name and drop anything path-like
+        let safe = file_name
+            .rsplit(|c| c == '/' || c == '\\')
+            .next()
+            .unwrap_or("file")
+            .trim()
+            .trim_matches('.')
+            .to_string();
+        let name = if safe.is_empty() { "file".to_string() } else { safe };
+        let id = self.staging_counter.fetch_add(1, Ordering::Relaxed);
+        let path = self.staging_dir().join(format!("{}.part", id));
+        // create/truncate eagerly so the first append cannot clobber an
+        // older staged file with the same id after a restart
+        std::fs::File::create(&path)?;
+        self.staged.lock().unwrap().insert(id, StagedUpload { name, path });
+        Ok(id)
+    }
+
+    /// Append one base64-encoded chunk to a staged upload.
+    pub fn staged_upload_append(&self, id: u64, data_b64: &str) -> Result<()> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data_b64.trim())
+            .map_err(|e| anyhow!("bad chunk data: {}", e))?;
+        let path = {
+            let map = self.staged.lock().unwrap();
+            map.get(&id)
+                .map(|r| r.path.clone())
+                .ok_or_else(|| anyhow!("unknown upload id"))?
+        };
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path)?;
+        f.write_all(&bytes)?;
+        Ok(())
+    }
+
+    /// Finish a staged upload: send the staged bytes to `remote_dir` on the
+    /// peer. Returns the transfer id (progress shows up like any upload).
+    pub async fn staged_upload_finish(
+        self: &Arc<Self>,
+        id: u64,
+        peer_id: &str,
+        remote_dir: &str,
+    ) -> Result<u64> {
+        let rec = {
+            let map = self.staged.lock().unwrap();
+            map.get(&id)
+                .cloned()
+                .ok_or_else(|| anyhow!("unknown upload id"))?
+        };
+        let total = std::fs::metadata(&rec.path)?.len();
+        let remote = format!("{}/{}", remote_dir.trim_end_matches('/'), rec.name);
+        let tid = self
+            .transfers
+            .begin("upload", peer_id, &self.peer_name(peer_id).await, &remote, total);
+        let this = self.clone();
+        let peer_id = peer_id.to_string();
+        let remote = remote.clone();
+        tokio::spawn(async move {
+            let res: anyhow::Result<()> = async {
+                let pairing = this
+                    .pairs
+                    .pairing_by_id(&peer_id)
+                    .await
+                    .ok_or_else(|| anyhow!("not paired"))?;
+                let mut file = tokio::fs::File::open(&rec.path).await?;
+                let mut conn = this.connect_paired(&pairing).await?;
+                let mut prog = transfers::Progress::new(tid, this.transfers.clone());
+                client::upload_from(
+                    &mut conn,
+                    &pairing.token,
+                    &remote,
+                    &mut file,
+                    total,
+                    |done| prog.tick(done),
+                )
+                .await
+            }
+            .await;
+            // the staged copy is no longer needed either way
+            let _ = tokio::fs::remove_file(&rec.path).await;
+            this.staged.lock().unwrap().remove(&id);
+            match res {
+                Ok(_) => {
+                    this.transfers.finish(tid, "done");
+                    let _ = this.events.send(CoreEvent::Toast {
+                        message: format!("Uploaded {}", remote.rsplit('/').next().unwrap_or("")),
+                    });
+                }
+                Err(e) => {
+                    this.transfers.finish(tid, "failed");
+                    let _ = this.events.send(CoreEvent::Toast {
+                        message: format!("Upload failed: {}", e),
+                    });
+                }
+            }
+        });
+        Ok(tid)
     }
 
     // ------------------------------------------------------------- windows
@@ -1012,32 +1157,51 @@ async fn heartbeat_loop(app: Arc<SingleApp>) {
     loop {
         tokio::time::sleep(Duration::from_secs(6)).await;
         let pairings = app.pairs.list_pairings().await;
+        // Probe all paired devices concurrently: one offline peer with a
+        // slow TCP timeout must not delay everyone else's status update.
+        let mut handles = Vec::new();
         for p in pairings {
-            let mut online = false;
-            if let Some(disc) = app.discovery.read().unwrap().clone() {
-                if let Some(rec) = disc.get(&p.id) {
-                    if rec.last_seen + 20 >= now() {
-                        online = true;
+            let app = app.clone();
+            handles.push(tokio::spawn(async move {
+                let mut online = false;
+                if let Some(disc) = app.discovery.read().unwrap().clone() {
+                    if let Some(rec) = disc.get(&p.id) {
+                        if rec.last_seen + 20 >= now() {
+                            online = true;
+                        }
                     }
                 }
+                if !online {
+                    // direct probe
+                    online = (async {
+                        let mut conn = app.connect_paired(&p).await.ok()?;
+                        client::ping(&mut conn).await.ok()?;
+                        Some(true)
+                    })
+                    .await
+                    .unwrap_or(false);
+                }
+                (p.id, online)
+            }));
+        }
+        let mut states = Vec::new();
+        for h in handles {
+            if let Ok(pair) = h.await {
+                states.push(pair);
             }
-            if !online {
-                // direct probe
-                online = (async {
-                    let mut conn = app.connect_paired(&p).await.ok()?;
-                    client::ping(&mut conn).await.ok()?;
-                    Some(true)
-                })
-                .await
-                .unwrap_or(false);
-            }
+        }
+        let mut changed = false;
+        {
             let mut map = app.online.lock().unwrap();
-            let changed = map.get(&p.id).copied().unwrap_or(false) != online;
-            map.insert(p.id.clone(), online);
-            drop(map);
-            if changed {
-                let _ = app.events.send(CoreEvent::DevicesChanged);
+            for (id, online) in states {
+                if map.get(&id).copied().unwrap_or(false) != online {
+                    changed = true;
+                }
+                map.insert(id, online);
             }
+        }
+        if changed {
+            let _ = app.events.send(CoreEvent::DevicesChanged);
         }
     }
 }

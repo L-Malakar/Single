@@ -247,7 +247,10 @@ pub mod android {
         // one big shell command = one root prompt
         let mut script = String::from("mkdir -p /single;");
         for (name, suffix) in peers {
-            let folder = format!("{} ({})", crate::config::safe_folder_name(name), &suffix[..6]);
+            // suffix may be shorter than 6 on legacy/corrupt records —
+            // slicing blind would panic and take the app down
+            let cut = 6.min(suffix.len());
+            let folder = format!("{} ({})", crate::config::safe_folder_name(name), &suffix[..cut]);
             let src = app_devices_dir.join(&folder);
             let _ = std::fs::create_dir_all(&src);
             let src = src.to_str().unwrap_or("");

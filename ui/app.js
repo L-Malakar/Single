@@ -86,9 +86,46 @@ function openModal(html) {
 function closeModal() {
   $("#modal-root").classList.add("hidden");
   $("#modal-box").innerHTML = "";
+  document.documentElement.style.removeProperty("--kb-offset");
   if (modalResolver) { const r = modalResolver; modalResolver = null; r(null); }
 }
 $("#modal-backdrop").addEventListener("click", closeModal);
+
+/* Keep the bottom sheet above the on-screen keyboard (Android). The
+   WebView may pan instead of resize, so track the visual viewport and
+   lift the sheet by exactly the keyboard height. */
+if (window.visualViewport) {
+  const onViewport = () => {
+    const root = $("#modal-root");
+    if (!root || root.classList.contains("hidden")) {
+      document.documentElement.style.removeProperty("--kb-offset");
+      return;
+    }
+    const kb = Math.max(0, window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop);
+    document.documentElement.style.setProperty("--kb-offset", kb + "px");
+  };
+  window.visualViewport.addEventListener("resize", onViewport);
+  window.visualViewport.addEventListener("scroll", onViewport);
+}
+
+/* Android hardware back button: with an empty history the WebView exits
+   the app on back. Keep one sentinel entry armed and consume back presses
+   sensibly — close the modal first, then return to Devices. When there is
+   nothing to close we do not re-arm, so the next back press follows the
+   system default (app goes to the background). */
+function armBackButton() {
+  try { history.pushState({ single: 1 }, ""); } catch { return; }
+  window.addEventListener("popstate", () => {
+    const modalOpen = !$("#modal-root").classList.contains("hidden");
+    if (modalOpen) {
+      closeModal();
+      armBackButton();
+    } else if (state.view !== "devices") {
+      switchView("devices");
+      armBackButton();
+    }
+  });
+}
 
 /* Long-press guards. On Android, holding an image pops up the WebView's
    native callout / drag preview on top of the app and the screen freezes
@@ -442,7 +479,10 @@ async function fileAction(act, path, isDir) {
   try {
     if (act === "download") {
       const tid = await invoke("download_file", { peerId: peer, path });
-      toast("Download started");
+      const mobile = document.body.classList.contains("mobile");
+      toast(mobile && state.info?.downloads_dir
+        ? `Downloading to ${state.info.downloads_dir}`
+        : "Download started");
       updateBadge();
     } else if (act === "delete") {
       const ok = await uiConfirm({
@@ -489,9 +529,60 @@ $("#btn-new-folder").addEventListener("click", async () => {
   } catch (e) { toast(String(e), true); }
 });
 
+/* Uploads. Desktop: the plugin picker returns real file paths. Android:
+   the plugin picker returns content:// URIs that Rust cannot open, so the
+   WebView's own <input type="file"> is used — the browser hands us real
+   bytes which are staged in chunks (upload_begin/chunk/end) and then go
+   through the normal upload pipeline with progress. */
+const UPLOAD_CHUNK = 4 * 1024 * 1024;
+
+function bytesToBase64(bytes) {
+  let bin = "";
+  const STEP = 0x8000;
+  for (let off = 0; off < bytes.length; off += STEP) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(off, off + STEP));
+  }
+  return btoa(bin);
+}
+
+async function stageAndUpload(file, peerId, remoteDir) {
+  const uploadId = await invoke("upload_begin", { fileName: file.name });
+  const slices = Math.max(1, Math.ceil(file.size / UPLOAD_CHUNK));
+  for (let i = 0; i < slices; i++) {
+    const buf = await file.slice(i * UPLOAD_CHUNK, (i + 1) * UPLOAD_CHUNK).arrayBuffer();
+    const b64 = bytesToBase64(new Uint8Array(buf));
+    await invoke("upload_chunk", { uploadId, dataB64: b64 });
+  }
+  await invoke("upload_end", { uploadId, peerId, remoteDir });
+  toast(`Uploading ${file.name}…`);
+}
+
+let pickerBusy = false;
+$("#file-picker").addEventListener("change", async () => {
+  const files = Array.from($("#file-picker").files ?? []);
+  $("#file-picker").value = "";
+  if (!files.length || !state.files.peer) return;
+  if (pickerBusy) return;
+  pickerBusy = true;
+  try {
+    for (const file of files) {
+      await stageAndUpload(file, state.files.peer, currentFilesPath());
+    }
+    updateBadge();
+  } catch (e) {
+    toast(String(e), true);
+  } finally {
+    pickerBusy = false;
+  }
+});
+
 $("#btn-upload").addEventListener("click", async () => {
   if (!state.files.peer) {
     toast("Open a paired device first — uploads always go to the other device.", true);
+    return;
+  }
+  if (state.info?.platform === "android") {
+    $("#file-picker").click();
     return;
   }
   try {
@@ -561,6 +652,9 @@ async function renderSettings() {
   $("#panel-android").classList.toggle("hidden", !isAndroid);
   $("#field-automap").classList.toggle("hidden", !isWin);
   $("#field-rootmode").classList.toggle("hidden", !isAndroid);
+  // the folder picker cannot return a usable path on Android (content://),
+  // and the app-storage share folder is fixed there — hide the field
+  $("#field-share").classList.toggle("hidden", isAndroid);
 
   if (isWin) {
     try {
@@ -625,6 +719,7 @@ function renderAbout() {
     <span class="k">Device ID</span><span class="v">${esc(i.id ?? "")}</span>
     <span class="k">Addresses</span><span class="v">${esc((i.ips ?? []).join(", ") || "—")}:${esc(i.port ?? "")}</span>
     <span class="k">Shared folder</span><span class="v">${esc(i.share_dir ?? "")}</span>
+    <span class="k">Downloads land in</span><span class="v">${esc(i.downloads_dir ?? "")}</span>
     <span class="k">Version</span><span class="v">${esc(i.version ?? "")}</span>
     <span class="k">Platform</span><span class="v">${esc(i.platform ?? "")}</span>`;
 }
@@ -688,7 +783,14 @@ async function boot() {
     $("#me-id").textContent = "not connected to backend";
     toast(String(e), true);
   }
-  if (state.info?.platform === "android") document.body.classList.add("mobile");
+  // The backend platform is authoritative: a touch-screen Windows laptop
+  // must not stay stuck in the mobile layout because the UA check matched.
+  // (Only fall back to the UA/touch hint when the backend is unreachable.)
+  document.body.classList.toggle(
+    "mobile",
+    state.info ? state.info.platform === "android" : IS_MOBILE
+  );
+  if (document.body.classList.contains("mobile")) armBackButton();
   refreshDevices();
   updateBadge();
   setInterval(updateBadge, 4000);

@@ -43,7 +43,7 @@
         await new Promise((r) => setTimeout(r, 120));
         switch (cmd) {
           case "get_app_info":
-            return { id: "0a1b2c3d4e5f6789", name: "My-Laptop", ca_fp: "ff".repeat(32), ips: ["192.168.1.10"], port: 27500, share_dir: "C:\\Users\\me\\.lmalakar\\Single\\Share", version: "0.1.4", platform: "windows", theme: "dark", auto_map_drives: true, root_mode: false };
+            return { id: "0a1b2c3d4e5f6789", name: "My-Laptop", ca_fp: "ff".repeat(32), ips: ["192.168.1.10"], port: 27500, share_dir: "C:\\Users\\me\\.lmalakar\\Single\\Share", downloads_dir: "C:\\Users\\me\\.lmalakar\\Single\\Downloads", version: "0.1.5", platform: "windows", theme: "dark", auto_map_drives: true, root_mode: false };
           case "list_devices": return devices;
           case "list_transfers": return transfers;
           case "browse": {
@@ -58,6 +58,9 @@
           case "download_file":
           case "upload_files":
             return 99;
+          case "upload_begin": return 1;
+          case "upload_chunk": return null;
+          case "upload_end": return 99;
           case "set_settings": return window.__TAURI__.core.invoke("get_app_info");
           default: return null;
         }

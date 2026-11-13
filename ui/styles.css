@@ -407,14 +407,18 @@ button, .file-row, .tab, .crumb, .nav-item { touch-action: manipulation; }
   .transfer-item { padding: 12px 14px; }
 
   /* --- dialogs become bottom sheets --- */
+  /* --kb-offset is set from JS when the on-screen keyboard is open, so the
+     sheet (and its inputs) ride above the keyboard instead of under it. */
   .modal {
-    left: 0; right: 0; top: auto; bottom: 0;
+    left: 0; right: 0; top: auto;
+    bottom: var(--kb-offset, 0px);
     transform: none;
-    width: 100%; max-height: 85dvh;
+    width: 100%; max-height: calc(85dvh - var(--kb-offset, 0px));
     border-radius: 18px 18px 0 0;
     border-left: none; border-right: none; border-bottom: none;
     padding-bottom: calc(20px + env(safe-area-inset-bottom));
     animation: sheet-up 0.22s ease-out;
+    transition: bottom 0.15s ease-out;
   }
   .modal .row-end { gap: 10px; }
   .modal .row-end .btn { flex: 1; justify-content: center; padding: 12px; font-size: 14px; }

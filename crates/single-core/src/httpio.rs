@@ -251,23 +251,24 @@ where
     let size_hex = size_str.split(';').next().unwrap_or("").trim();
     let size = usize::from_str_radix(size_hex, 16).context("bad chunk size")?;
     if size == 0 {
-        // trailing CRLF (and possible trailers) — read until blank line
+        // terminal chunk: consume trailer lines (if any) until an empty
+        // line. The old code could stop one CRLF short, leaving stray bytes
+        // in the stream and desyncing the next request on a keep-alive
+        // connection.
         let mut trailing = Vec::new();
         loop {
             let mut b = [0u8; 1];
             let n = reader.read(&mut b).await?;
-            if n == 0 || b[0] == b'\n' {
-                if trailing.ends_with(b"\r\n") || trailing.is_empty() {
-                    break;
-                }
-                if b[0] == b'\n' {
-                    break;
-                }
+            if n == 0 {
+                return Err(anyhow!("closed in trailers"));
             }
-            if b[0] != b'\r' {
-                trailing.push(b[0]);
-            } else {
-                trailing.push(b'\r');
+            trailing.push(b[0]);
+            if b[0] == b'\n' {
+                // a line that was only \r\n (or \n) ends the trailer block
+                if trailing.len() <= 2 {
+                    break;
+                }
+                trailing.clear();
             }
             if trailing.len() > 8192 {
                 return Err(anyhow!("trailers too large"));

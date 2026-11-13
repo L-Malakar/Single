@@ -62,8 +62,27 @@ impl Transfers {
         if let Some(t) = map.get_mut(&id) {
             t.state = state;
             let snap = t.clone();
+            // the registry used to grow without bound over long sessions
+            self.prune_finished(&mut map);
             drop(map);
             let _ = self.events.send(CoreEvent::Transfer(snap));
+        }
+    }
+
+    /// Keep every active transfer plus the most recent 50 finished ones.
+    fn prune_finished(&self, map: &mut HashMap<u64, TransferSnapshot>) {
+        let finished: Vec<u64> = map
+            .iter()
+            .filter(|(_, t)| t.state != "active")
+            .map(|(id, _)| *id)
+            .collect();
+        if finished.len() > 50 {
+            let mut obsolete: Vec<u64> = finished;
+            obsolete.sort_unstable();
+            let excess = obsolete.len() - 50;
+            for id in obsolete.into_iter().take(excess) {
+                map.remove(&id);
+            }
         }
     }
 

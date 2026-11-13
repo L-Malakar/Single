@@ -238,7 +238,10 @@ pub fn parse_multistatus(xml: &str, base_path: &str) -> Vec<FsEntry> {
                     })
                     .unwrap_or(0);
                 out.push(FsEntry {
-                    name: unescape(&name),
+                    // `name` is a slice of the already percent-decoded and
+                    // XML-unescaped href — unescaping again would corrupt
+                    // names that literally contain "&amp;" or "&#x2F;"
+                    name,
                     path: rel,
                     is_dir,
                     size,

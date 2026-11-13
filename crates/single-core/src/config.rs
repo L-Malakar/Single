@@ -64,6 +64,13 @@ impl Default for Config {
 }
 
 fn default_device_name() -> String {
+    // Android: env vars are empty there and a random hex name is useless
+    // when two phones pair — use the marketing model (e.g. "Pixel 7").
+    if cfg!(target_os = "android") {
+        if let Some(model) = android_device_model() {
+            return model;
+        }
+    }
     if let Ok(n) = std::env::var("COMPUTERNAME") {
         if !n.trim().is_empty() {
             return n.trim().to_string();
@@ -77,6 +84,28 @@ fn default_device_name() -> String {
     let mut buf = [0u8; 2];
     getrandom_fill(&mut buf);
     format!("Single-{}", hex::encode(buf))
+}
+
+#[cfg(target_os = "android")]
+fn android_device_model() -> Option<String> {
+    let out = std::process::Command::new("getprop")
+        .arg("ro.product.model")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_device_model() -> Option<String> {
+    None
 }
 
 fn getrandom_fill(buf: &mut [u8]) {
@@ -141,6 +170,20 @@ impl Paths {
     /// Where files downloaded from peers are placed.
     pub fn downloads(&self) -> PathBuf {
         self.base.join("Downloads")
+    }
+
+    /// Best download location for the user. On Android the app-private
+    /// `Downloads` folder is invisible in gallery / file managers, so prefer
+    /// the public Download folder whenever the OS lets us write it (legacy
+    /// storage or all-files access); otherwise fall back to app storage.
+    pub fn preferred_downloads(&self) -> PathBuf {
+        if cfg!(target_os = "android") {
+            let public = PathBuf::from("/storage/emulated/0/Download/Single");
+            if std::fs::create_dir_all(&public).is_ok() && dir_writable(&public) {
+                return public;
+            }
+        }
+        self.downloads()
     }
     /// Android: app-visible per-device folders (also bind-mounted to /single in root mode).
     pub fn device_folders(&self) -> PathBuf {
@@ -213,6 +256,19 @@ pub fn ensure_dir(p: &Path) -> Result<()> {
             .with_context(|| format!("failed to create folder {}", p.display()))?;
     }
     Ok(())
+}
+
+/// Probe whether a folder actually accepts writes (a `create_dir_all` that
+/// found an existing folder proves nothing on Android scoped storage).
+fn dir_writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".single-probe-{}", std::process::id()));
+    match std::fs::write(&probe, b"ok") {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]

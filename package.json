@@ -1,7 +1,7 @@
 {
   "name": "single",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Build glue for Single (Tauri): exposes the \"tauri\" script that the Android Gradle build invokes via \"npm run tauri\".",
   "scripts": {
     "tauri": "tauri"
